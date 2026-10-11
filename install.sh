@@ -82,6 +82,7 @@ install_deps() {
 
 # ------------------------------------------------------------- 2. download ---
 # Resolve the newest release tag from the GitHub API, then pull the bundle.
+# If no release asset exists yet, fall back to building from source.
 download_bundle() {
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' EXIT
@@ -90,18 +91,41 @@ download_bundle() {
     if command -v curl >/dev/null; then
         # Follow the latest-release redirect to discover the tag.
         TAG="$(curl -fsSL -o /dev/null -w '%{url_effective}' "$REPO_URL/releases/latest" 2>/dev/null \
-            | grep -oE 'tag/v[0-9]+\.[0-9]+\.[0-9]+' | cut -d/ -f2)"
+            | grep -oE 'tag/v[0-9]+\.[0-9]+\.[0-9]+' | cut -d/ -f2 || true)"
         [ -n "$TAG" ] || TAG="v0.1.0"
         URL="$REPO_URL/releases/download/$TAG/nebula-linux-x86_64.tar.gz"
-        curl -fsSL --proto '=https' -o "$TMP/nebula.tar.gz" "$URL" \
-            || die "download failed ($URL). Build from source: cargo build --release"
+        if curl -fsSL --proto '=https' -o "$TMP/nebula.tar.gz" "$URL" 2>/dev/null; then
+            log "unpacking…"
+            mkdir -p "$INSTALL_DIR"
+            tar -xzf "$TMP/nebula.tar.gz" -C "$INSTALL_DIR"
+            return 0
+        fi
+        warn "no prebuilt release found at $URL"
     else
         die "curl not found"
     fi
 
-    log "unpacking…"
+    build_from_source "$TMP"
+}
+
+# ------------------------------------------------------- 2b. source build ---
+# Fallback used when no release asset is published yet: clone the repo and
+# run the same build the release workflow runs.
+build_from_source() {
+    local TMP="$1"
+    command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust from https://rustup.rs"
+
+    log "building from source…"
+    git clone --depth 1 "$REPO_URL" "$TMP/src" \
+        || die "clone failed ($REPO_URL)"
+    ( cd "$TMP/src" && cargo build --release --workspace ) \
+        || die "build failed — see the cargo output above"
+
     mkdir -p "$INSTALL_DIR"
-    tar -xzf "$TMP/nebula.tar.gz" -C "$INSTALL_DIR"
+    cp "$TMP/src/target/release/nebula" "$INSTALL_DIR/"
+    cp "$TMP/src/target/release/libnebula_hook.so" "$INSTALL_DIR/"
+    cp "$TMP/src/nebula-attach" "$INSTALL_DIR/"
+    chmod +x "$INSTALL_DIR/nebula" "$INSTALL_DIR/nebula-attach"
 }
 
 # ---------------------------------------------------------------- 3. links ---
