@@ -62,7 +62,8 @@ ipcMain.handle('nebula:getState', async () => {
   const prefs = loadPrefs();
   const procs = await findSoberProcesses();
   const override = await getOverride();
-  return { prefs, procs, override, paths: { root: NEBULA_ROOT, queue: QUEUE_DIR, log: LOG_FILE } };
+  const hookStatus = await getHookStatus();
+  return { prefs, procs, override, hookStatus, paths: { root: NEBULA_ROOT, queue: QUEUE_DIR, log: LOG_FILE } };
 });
 
 ipcMain.handle('nebula:savePrefs', async (_e, prefs) => {
@@ -128,6 +129,30 @@ async function findSoberProcesses() {
 async function getOverride() {
   const res = await run('flatpak override --show org.vinegarhq.Sober');
   return res.ok ? res.stdout : '';
+}
+
+async function getHookStatus() {
+  // Check if the hook is actually loaded in any Sober process
+  const procs = await findSoberProcesses();
+  if (procs.length === 0) return { state: 'idle', message: 'Sober not running' };
+  
+  // Check if any Sober process has our hook loaded
+  for (const proc of procs) {
+    const res = await run(`grep -l "libnebula_hook" /proc/${proc.pid}/maps 2>/dev/null || true`);
+    if (res.ok && res.stdout) {
+      return { state: 'attached', message: 'Hook loaded' };
+    }
+  }
+  
+  // Check if the queue status file indicates attachment
+  try {
+    const status = fs.readFileSync(path.join(QUEUE_DIR, 'status'), 'utf8').trim();
+    if (status === 'ATTACHED') {
+      return { state: 'attached', message: 'Hook reported attached' };
+    }
+  } catch {}
+  
+  return { state: 'waiting', message: 'Sober running, hook not yet loaded' };
 }
 
 app.whenReady().then(() => {

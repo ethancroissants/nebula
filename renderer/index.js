@@ -70,9 +70,17 @@ async function refresh() {
   // Processes
   els.processCount.textContent = String(state.procs.length);
 
-  // Hook
-  if (state.procs.length > 0) setStatus(els.hookStatus, 'Attached', 'ok');
-  else setStatus(els.hookStatus, 'Idle', 'idle');
+  // Hook - use the actual hook status from the main process
+  if (state.hookStatus) {
+    const kind = state.hookStatus.state === 'attached' ? 'ok' 
+               : state.hookStatus.state === 'waiting' ? 'warn' 
+               : 'idle';
+    setStatus(els.hookStatus, state.hookStatus.message, kind);
+  } else {
+    // Fallback to old logic
+    if (state.procs.length > 0) setStatus(els.hookStatus, 'Attached', 'ok');
+    else setStatus(els.hookStatus, 'Idle', 'idle');
+  }
 
   // Prefs
   els.cbAutoAttach.checked = !!state.prefs.autoAttach;
@@ -101,9 +109,25 @@ els.btnInstallSober.addEventListener('click', async () => {
 
 els.btnAttach.addEventListener('click', async () => {
   log('Attaching to Soberâ¦');
-  const res = await window.nebula.attach();
-  log(res.ok ? 'Attach complete.' : `Attach failed: ${res.stderr || res.stdout}`, res.ok ? 'ok' : 'err');
-  refresh();
+  els.btnAttach.disabled = true;
+  els.btnAttach.textContent = 'Attaching…';
+  
+  try {
+    const res = await window.nebula.attach();
+    if (res.ok) {
+      log('Attach complete. Launch Sober now.', 'ok');
+      log('Tip: Completely quit Sober (including tray) before launching for best results.');
+    } else {
+      log(`Attach failed: ${res.stderr || res.stdout}`, 'err');
+      log('Try running nebula-attach manually in a terminal for more details.', 'warn');
+    }
+  } catch (err) {
+    log(`Attach error: ${err}`, 'err');
+  } finally {
+    els.btnAttach.disabled = false;
+    els.btnAttach.textContent = 'Attach';
+    refresh();
+  }
 });
 
 els.btnLaunchSober.addEventListener('click', async () => {

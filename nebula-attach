@@ -12,9 +12,10 @@ APP_ID="org.vinegarhq.Sober"
 SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 QUEUE_DIR="$HOME/.nebula/queue"
 
+# Find the hook library
 for candidate in "$SELF_DIR/libnebula_hook.so" \
-                 "$HOME/.local/lib/nebula/libnebula_hook.so" \
-                 "/usr/lib/nebula/libnebula_hook.so"; do
+               "$HOME/.local/lib/nebula/libnebula_hook.so" \
+               "/usr/lib/nebula/libnebula_hook.so"; do
     if [ -f "$candidate" ]; then
         HOOK_SO="$(readlink -f "$candidate")"
         break
@@ -22,10 +23,13 @@ for candidate in "$SELF_DIR/libnebula_hook.so" \
 done
 [ -n "${HOOK_SO:-}" ] || { echo "[nebula] hook .so not found" >&2; exit 1; }
 
-[ "$(id -u)" = 0 ] && SUDO="sudo" || SUDO=""
+echo "[nebula] stopping any running Sober instances…"
+# Kill any running Sober processes to ensure clean state
+pkill -f "sober" || true
+sleep 1  # Give processes time to terminate
 
 echo "[nebula] resetting previous overrides…"
-flatpak override --user --reset "$APP_ID"
+flatpak override --user --reset "$APP_ID" || true
 
 echo "[nebula] granting sandbox access to $QUEUE_DIR (rw)"
 mkdir -p "$QUEUE_DIR"
@@ -34,8 +38,19 @@ flatpak override --user --filesystem="$QUEUE_DIR:rw" "$APP_ID"
 echo "[nebula] setting LD_PRELOAD=$HOOK_SO"
 flatpak override --user --env=LD_PRELOAD="$HOOK_SO" "$APP_ID"
 
+# Verify the override was applied
+echo "[nebula] verifying override…"
+OVERRIDE_OUTPUT=$(flatpak override --user --show "$APP_ID" 2>/dev/null || true)
+if echo "$OVERRIDE_OUTPUT" | grep -q "LD_PRELOAD=$HOOK_SO"; then
+    echo "[nebula] ✦ override verified"
+else
+    echo "[nebula] ⚠ warning: override may not have been applied correctly"
+    echo "[nebula] current override: $OVERRIDE_OUTPUT"
+fi
+
 echo
 echo "[nebula] ✦ attached. Launch Sober now:"
 echo "    flatpak run $APP_ID"
 echo
 echo "  Console: ~/.nebula/queue/log"
+echo "  Tip: If injection fails, completely quit Sober (including tray) and retry"
