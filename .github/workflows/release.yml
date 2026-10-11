@@ -16,6 +16,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -31,16 +36,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Build release
+      - name: Build Rust hook
         run: cargo build --release --workspace
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Package Electron app
+        run: npm run package
 
       - name: Create release bundle
         run: |
           mkdir -p dist/nebula-linux-x86_64
-          cp target/release/nebula dist/nebula-linux-x86_64/
-          cp target/release/libnebula_hook.so dist/nebula-linux-x86_64/
-          cp nebula-attach dist/nebula-linux-x86_64/
-          strip -s dist/nebula-linux-x86_64/nebula dist/nebula-linux-x86_64/libnebula_hook.so 2>/dev/null || true
+          cp -r Nebula-linux-x64/* dist/nebula-linux-x86_64/
+          # Include the Rust-built hook alongside the Electron app
+          mkdir -p dist/nebula-linux-x86_64/hook
+          cp target/release/libnebula_hook.so dist/nebula-linux-x86_64/hook/
+          cp nebula-attach dist/nebula-linux-x86_64/hook/
           tar -czf dist/nebula-linux-x86_64.tar.gz -C dist nebula-linux-x86_64
 
       - name: Create GitHub Release
