@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nebula â for Sober</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="app-header">
+      <h1>Nebula</h1>
+      <p class="subtitle">for Sober</p>
+    </header>
+
+    <main class="app-main">
+      <section class="panel status-panel">
+        <h2>Status</h2>
+        <div class="status-grid">
+          <div class="status-item">
+            <label>Sober</label>
+            <span id="sober-status" class="status-indicator idle">Not installed</span>
+          </div>
+          <div class="status-item">
+            <label>Override</label>
+            <span id="override-status" class="status-value">None</span>
+          </div>
+          <div class="status-item">
+            <label>Processes</label>
+            <span id="process-count" class="status-value">0</span>
+          </div>
+          <div class="status-item">
+            <label>Hook</label>
+            <span id="hook-status" class="status-indicator idle">Idle</span>
+          </div>
+        </div>
+
+        <div class="button-group">
+          <button id="btn-check-sober" class="btn btn-primary">Check Sober</button>
+          <button id="btn-install-sober" class="btn btn-secondary">Install Sober</button>
+          <button id="btn-attach" class="btn btn-success">Attach</button>
+          <button id="btn-launch-sober" class="btn btn-warning">Launch Sober</button>
+        </div>
+      </section>
+
+      <section class="panel editor-panel">
+        <h2>Script Executor</h2>
+        <div class="editor-toolbar">
+          <button id="btn-execute" class="btn btn-primary">Execute (F5)</button>
+          <button id="btn-clear" class="btn btn-secondary">Clear</button>
+          <button id="btn-load" class="btn btn-secondary">Load</button>
+          <button id="btn-save" class="btn btn-secondary">Save</button>
+          <select id="font-size-select">
+            <option value="10">10px</option>
+            <option value="12">12px</option>
+            <option value="13" selected>13px</option>
+            <option value="14">14px</option>
+            <option value="16">16px</option>
+            <option value="18">18px</option>
+          </select>
+          <label class="switch">
+            <input type="checkbox" id="cb-auto-attach">
+            <span class="slider"></span>
+            Auto-attach on launch
+          </label>
+        </div>
+
+        <div class="editor-wrapper">
+          <textarea id="script-editor" placeholder="-- Nebula Script Executor
+-- Write your Lua scripts here
+-- Press F5 to execute"></textarea>
+        </div>
+
+        <div class="editor-footer">
+          <span id="editor-status" class="editor-status">Ready</span>
+        </div>
+      </section>
+
+      <section class="panel console-panel">
+        <h2>Console Output</h2>
+        <div id="console-output" class="console-output"></div>
+        <div class="console-toolbar">
+          <button id="btn-clear-console" class="btn btn-secondary">Clear</button>
+          <button id="btn-save-console" class="btn btn-secondary">Save</button>
+          <button id="btn-scroll-console" class="btn btn-toggle active">Scroll: ON</button>
+        </div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <div class="footer-links">
+        <a href="https://github.com/ethancroissants/nebula" target="_blank">GitHub</a>
+        <span>|</span>
+        <a href="https://flatpak.org" target="_blank">Flatpak</a>
+        <span>|</span>
+        <a href="https://www.electronjs.org" target="_blank">Electron</a>
+      </div>
+      <div class="footer-version">
+        Nebula v0.1.0 â Built with Electron
+      </div>
+    </footer>
+  </div>
+
+  <script type="module" src="./index.js"></script>
+</body>
+</html>

@@ -14,10 +14,11 @@ curl -fsSL https://raw.githubusercontent.com/ethancroissants/nebula/main/install
 
 ## What it looks like
 
-- Deep-space dark theme with an indigo→violet gradient header
-- Code editor with line numbers and Lua syntax highlighting
+- Deep-space dark theme with a single violet accent on honest neutrals
+- Code editor with adjustable font size and F5-to-execute
 - Live console that streams output from *inside* the game
-- One-click **Attach**, one-click **Execute** (or press F5)
+- One-click **Attach**, one-click **Execute**
+- Built with Electron — cross-platform, easy to extend
 
 ## How it works
 
@@ -124,13 +125,16 @@ cargo build --release
 crates/
   nebula-core/   Sober detection, flatpak override logic, script queue
   nebula-hook/   cdylib injected into Sober (Luau state capture + executor)
-  nebula/        eframe/egui desktop app
 tests/           fake Luau runtime + e2e pipeline test (no Sober needed)
 install.sh       distro-aware one-line installer (GitHub-hosted)
 nebula-attach    headless attach helper
 pack.sh          builds the release tarball
 .github/         release workflow (tag v* → attaches tarball to GitHub release)
 examples/        sample scripts
+main.js          Electron main process
+preload.js       Electron preload script
+renderer/        Electron renderer (HTML/CSS/JS)
+package.json     npm dependencies & scripts
 ```
 
 ## Safety & disclaimer

@@ -1,0 +1,28 @@
+{
+  "name": "nebula-electron",
+  "version": "0.1.0",
+  "description": "Nebula — sleek script executor for Sober (Electron rewrite)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "package": "electron-packager . Nebula --platform=linux --arch=x64 --icon=assets/icon.png --overwrite"
+  },
+  "keywords": [
+    "electron",
+    "roblox",
+    "script",
+    "executor",
+    "flatpak",
+    "sober"
+  ],
+  "author": "Nebula Contributors",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-packager": "^17.1.0"
+  },
+  "dependencies": {
+    "lodash": "^4.17.21"
+  }
+}
