@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# The default GITHUB_TOKEN needs explicit write access to create a release
+# and upload the tarball as an asset.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release
+        run: cargo build --release --workspace
+
+      - name: Create release bundle
+        run: |
+          mkdir -p dist/nebula-linux-x86_64
+          cp target/release/nebula dist/nebula-linux-x86_64/
+          cp target/release/libnebula_hook.so dist/nebula-linux-x86_64/
+          cp nebula-attach dist/nebula-linux-x86_64/
+          strip -s dist/nebula-linux-x86_64/nebula dist/nebula-linux-x86_64/libnebula_hook.so 2>/dev/null || true
+          tar -czf dist/nebula-linux-x86_64.tar.gz -C dist nebula-linux-x86_64
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "Creating release for tag $TAG"
+
+          RELEASE_ID=$(curl -s -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/$GITHUB_REPOSITORY/releases \
+            -d "{\"tag_name\":\"$TAG\",\"target_commitish\":\"$GITHUB_SHA\",\"name\":\"Release $TAG\",\"body\":\"Release $TAG\",\"draft\":false,\"prerelease\":false}" \
+            | jq -r .id)
+
+          echo "Release ID: $RELEASE_ID"
+
+          if [ "$RELEASE_ID" = "null" ] || [ -z "$RELEASE_ID" ]; then
+            echo "::error::Failed to create release"
+            exit 1
+          fi
+
+          # Upload the tarball as an asset
+          HTTP_CODE=$(curl -s -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Content-Type: application/gzip" \
+            https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$(basename dist/nebula-linux-x86_64.tar.gz) \
+            -H "Accept: application/vnd.github+json" \
+            --data-binary @dist/nebula-linux-x86_64.tar.gz \
+            -o /dev/null -w "%{http_code}")
+
+          echo "Upload status: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "201" ]; then
+            echo "::error::Failed to upload asset (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          echo "Release created successfully"
