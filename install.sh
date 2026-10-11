@@ -98,6 +98,11 @@ download_bundle() {
             log "unpacking…"
             mkdir -p "$INSTALL_DIR"
             tar -xzf "$TMP/nebula.tar.gz" -C "$INSTALL_DIR"
+            # The tarball contains a top-level directory; move contents up one level
+            if [ -d "$INSTALL_DIR/nebula-linux-x86_64" ]; then
+                mv "$INSTALL_DIR/nebula-linux-x86_64/"* "$INSTALL_DIR/"
+                rmdir "$INSTALL_DIR/nebula-linux-x86_64"
+            fi
             return 0
         fi
         warn "no prebuilt release found at $URL"
@@ -139,8 +144,37 @@ install_links() {
     done
     case ":$PATH:" in
         *":$BIN_DIR:"*) ;;
-        *) warn "$BIN_DIR is not on your PATH — add it to your shell profile." ;;
+        *) add_to_path ;;
     esac
+}
+
+# ------------------------------------------------------------- 3b. PATH ---
+# Persist $BIN_DIR on PATH by appending an export line to the user's shell
+# profile. Idempotent: skips if the line is already there.
+add_to_path() {
+    local profile=""
+    local shell_name
+    shell_name="$(basename "${SHELL:-/bin/sh}")"
+
+    case "$shell_name" in
+        zsh)  profile="$HOME/.zshrc" ;;
+        bash) profile="$HOME/.bashrc" ;;
+        fish) profile="$HOME/.config/fish/config.fish" ;;
+        *)    profile="$HOME/.profile" ;;
+    esac
+
+    local line="export PATH=\"$BIN_DIR:\$PATH\""
+    [ "$shell_name" = fish ] && line="set -gx PATH $BIN_DIR \$PATH"
+
+    if [ -f "$profile" ] && grep -qF "$BIN_DIR" "$profile" 2>/dev/null; then
+        log "$BIN_DIR already referenced in $profile"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$profile")"
+    printf '\n# Added by the Nebula installer\n%s\n' "$line" >> "$profile"
+    log "added $BIN_DIR to PATH in $profile"
+    warn "run 'exec $shell_name' (or open a new terminal) for it to take effect"
 }
 
 # ---------------------------------------------------------------- 4. sober ---
