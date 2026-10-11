@@ -6,7 +6,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
-    "package": "electron-packager . Nebula --platform=linux --arch=x64 --icon=assets/icon.png --overwrite"
+    "package": "electron-packager . Nebula --platform=linux --arch=x64 --overwrite --ignore=\"^/(target|dist|node_modules|Nebula-linux-x64|out)(/|$)\" --prune --asar"
   },
   "keywords": [
     "electron",
