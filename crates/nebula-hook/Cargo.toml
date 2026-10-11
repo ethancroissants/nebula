@@ -1,0 +1,15 @@
+[package]
+name = "nebula-hook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The injected hook: captures the Luau VM inside Sober and runs queued scripts"
+
+[lib]
+name = "nebula_hook"
+crate-type = ["cdylib"]
+
+[dependencies]
+nebula-core = { path = "../nebula-core" }
+serde_json = { workspace = true }

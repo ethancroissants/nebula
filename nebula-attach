@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# nebula-attach — headless attach: apply the flatpak override + LD_PRELOAD hook.
+#
+# Equivalent to clicking "Attach to Sober" in the GUI. Useful for scripting,
+# SSH sessions, or window-manager keybinds.
+#
+# Usage: nebula-attach [path-to-libnebula_hook.so]
+#   (defaults to the .so next to this script, then ~/.local/lib/nebula)
+set -euo pipefail
+
+APP_ID="org.vinegarhq.Sober"
+SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+QUEUE_DIR="$HOME/.nebula/queue"
+
+for candidate in "$SELF_DIR/libnebula_hook.so" \
+                 "$HOME/.local/lib/nebula/libnebula_hook.so" \
+                 "/usr/lib/nebula/libnebula_hook.so"; do
+    if [ -f "$candidate" ]; then
+        HOOK_SO="$(readlink -f "$candidate")"
+        break
+    fi
+done
+[ -n "${HOOK_SO:-}" ] || { echo "[nebula] hook .so not found" >&2; exit 1; }
+
+[ "$(id -u)" = 0 ] && SUDO="sudo" || SUDO=""
+
+echo "[nebula] resetting previous overrides…"
+flatpak override --user --reset "$APP_ID"
+
+echo "[nebula] granting sandbox access to $QUEUE_DIR (rw)"
+mkdir -p "$QUEUE_DIR"
+flatpak override --user --filesystem="$QUEUE_DIR:rw" "$APP_ID"
+
+echo "[nebula] setting LD_PRELOAD=$HOOK_SO"
+flatpak override --user --env=LD_PRELOAD="$HOOK_SO" "$APP_ID"
+
+echo
+echo "[nebula] ✦ attached. Launch Sober now:"
+echo "    flatpak run $APP_ID"
+echo
+echo "  Console: ~/.nebula/queue/log"
