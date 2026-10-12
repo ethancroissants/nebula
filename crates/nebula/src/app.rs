@@ -121,8 +121,18 @@ impl NebulaApp {
         let _ = nebula_core::sober::reset_overrides();
         let _ =
             nebula_core::sober::grant_filesystem(&self.paths.queue_dir().to_string_lossy(), true);
-        let preload = format!("{}:ro", hook_src.to_string_lossy());
-        let result = nebula_core::sober::set_env("LD_PRELOAD", &preload);
+
+        // The hook .so must also be visible inside the sandbox, otherwise the
+        // loader silently ignores the preload path.
+        if let Some(dir) = hook_src.parent() {
+            let _ = nebula_core::sober::grant_filesystem(&dir.to_string_lossy(), false);
+        }
+
+        // NOTE: no ":ro" suffix here. That is flatpak's --filesystem syntax;
+        // LD_PRELOAD is a colon-separated list of library paths, so ":ro"
+        // would make the loader look for a file literally named
+        // "libnebula_hook.so:ro" and fail the preload silently.
+        let result = nebula_core::sober::set_env("LD_PRELOAD", &hook_src.to_string_lossy());
 
         match result {
             Ok(()) => {

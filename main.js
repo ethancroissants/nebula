@@ -671,10 +671,13 @@ ipcMain.handle('nebula:launchAndInject', async () => {
       }
     }
 
-    // 1b. Scrub any preload entry a previous run left behind. A stale one
-    // puts the hook into Sober's maps at process start, which is precisely
-    // what its check_security rejects — the symptom looks identical to the
-    // hook "detecting" Sober, but the cause is an old file on disk.
+    // 1b. Scrub any preload entry a previous run left behind, so each run
+    // starts from a known state. This is hygiene, not a workaround: an
+    // earlier version of this flow believed check_security rejects a hook
+    // present at process start, and deferred seeding until after that check
+    // had already run. Since ld.so.preload is only read at exec(), that
+    // belief made the preload permanently unable to work and forced the
+    // ptrace path. Seeding before launch is what actually loads the hook.
     await clearStalePreloads();
 
     // 2. Safe mode? Launch Sober untouched — no override, no seeding.
@@ -686,12 +689,24 @@ ipcMain.handle('nebula:launchAndInject', async () => {
       return { ok: true, injected: false, safeMode: true };
     }
 
-    // 2b. Override the sandbox — but WITHOUT the runtime ld.so.preload write.
-    // That write happens right after check_security (see seed gate below).
+    // 2b. Override the sandbox AND seed the runtime ld.so.preload BEFORE
+    // launching Sober.
+    //
+    // ld.so.preload is read by the dynamic loader at exec() time and never
+    // again. The previous flow deferred this write until after check_security,
+    // by which point the Sober process had already exec'd — so the hook could
+    // never be mapped no matter how long we seeded. That left ptrace as the
+    // only route, and Sober's anti-debug kills a traced process.
+    //
+    // Seeding up front removes the need for both ptrace and binary patching.
+    // It is also architecturally unremarkable: Sober already preloads its own
+    // libbadcpu.so into the process at startup via the same mechanism, so a
+    // second preloaded object is not something check_security has any reason
+    // to treat specially.
     const seedingEnabled = !prefs.safeMode;
     let override;
     if (seedingEnabled) {
-      override = await applyOverride(hookLib, { skipRuntimePreload: true });
+      override = await applyOverride(hookLib);
       if (!override.ok) {
         sendProgress('error', 'Override failed — see console.');
         log(`Override error details: ${override.error}`, 'err');
@@ -834,12 +849,14 @@ ipcMain.handle('nebula:launchAndInject', async () => {
         }
       }
 
-      // REMOTE INJECT: ld.so.preload is only read at process START, but
-      // Sober's SingleSurfaceApp keeps the game (and its Luau VM) in the
-      // process that already booted — nothing new execs after the gate
-      // opens, so seeding alone can never load the hook. Once the gate is
-      // open and the .so is present in the sandbox but still unmapped,
-      // ptrace-attach and make the running process dlopen it directly.
+      // REMOTE INJECT (fallback only). The primary path is the runtime
+      // ld.so.preload seeded before launch. If the hook is still unmapped
+      // well after Sober started, the preload did not take effect, and the
+      // last resort is to ptrace the live process and make it dlopen the hook.
+      //
+      // Note this is destructive on a host with anti-debug: Sober terminates
+      // when it notices it is being traced. So it runs only after the preload
+      // path has demonstrably failed, never in parallel with it.
       if (seedingEnabled && checkSecurityPassed && !anyHook && elapsed >= 12) {
         if (Date.now() - lastInject > 10000) {
           lastInject = Date.now();
