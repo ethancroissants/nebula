@@ -96,13 +96,15 @@ download_bundle() {
         URL="$REPO_URL/releases/download/$TAG/nebula-linux-x86_64.tar.gz"
         if curl -fsSL --proto '=https' -o "$TMP/nebula.tar.gz" "$URL" 2>/dev/null; then
             log "unpacking…"
+            # Wipe the previous install so stale files from an older version
+            # (e.g. the old Rust/GTK layout) can't linger or block extraction.
+            rm -rf "$INSTALL_DIR"
             mkdir -p "$INSTALL_DIR"
-            tar -xzf "$TMP/nebula.tar.gz" -C "$INSTALL_DIR"
-            # The tarball contains a top-level directory; move contents up one level
-            if [ -d "$INSTALL_DIR/nebula-linux-x86_64" ]; then
-                mv "$INSTALL_DIR/nebula-linux-x86_64/"* "$INSTALL_DIR/"
-                rmdir "$INSTALL_DIR/nebula-linux-x86_64"
-            fi
+            # --strip-components=1 drops the tarball's top-level directory, so
+            # the contents land directly in $INSTALL_DIR. This is idempotent
+            # across re-installs, unlike `mv` which refuses to merge into an
+            # existing directory.
+            tar -xzf "$TMP/nebula.tar.gz" -C "$INSTALL_DIR" --strip-components=1
             return 0
         fi
         warn "no prebuilt release found at $URL"
@@ -136,12 +138,27 @@ build_from_source() {
 # ---------------------------------------------------------------- 3. links ---
 install_links() {
     mkdir -p "$BIN_DIR"
-    for bin_name in nebula nebula-attach; do
-        if [ -f "$INSTALL_DIR/$bin_name" ]; then
-            chmod +x "$INSTALL_DIR/$bin_name"
-            ln -sf "$INSTALL_DIR/$bin_name" "$BIN_DIR/$bin_name"
-        fi
+
+    # The Electron bundle ships the launcher as `Nebula` and the attach helper
+    # under hook/; the older Rust bundle shipped `nebula` + `nebula-attach` at
+    # the top level. Support both so `nebula` works either way.
+    local launcher=""
+    for candidate in "$INSTALL_DIR/nebula" "$INSTALL_DIR/Nebula"; do
+        [ -f "$candidate" ] && { launcher="$candidate"; break; }
     done
+    if [ -n "$launcher" ]; then
+        chmod +x "$launcher"
+        ln -sf "$launcher" "$BIN_DIR/nebula"
+    fi
+
+    local attach=""
+    for candidate in "$INSTALL_DIR/nebula-attach" "$INSTALL_DIR/hook/nebula-attach"; do
+        [ -f "$candidate" ] && { attach="$candidate"; break; }
+    done
+    if [ -n "$attach" ]; then
+        chmod +x "$attach"
+        ln -sf "$attach" "$BIN_DIR/nebula-attach"
+    fi
     case ":$PATH:" in
         *":$BIN_DIR:"*) ;;
         *) add_to_path ;;
