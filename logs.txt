@@ -1,0 +1,317 @@
+10:57:10Nebula ready. Press Launch & Inject to hook Sober.
+10:57:12Cleared stale Nebula preload entry from /var/lib/flatpak/runtime/org.gnome.Platform/x86_64/active/files/etc/ld.so.preload (sudo (no password needed))
+10:57:13Launching Sober…
+10:57:13Waiting for Sober to start…
+10:57:13[hook] [sober] sober: /usr/lib/x86_64-linux-gnu/libcurl.so.4: no version information available (required by sober)
+10:57:13Sober running — waiting for hook… (1s)
+10:57:16[hook] [sober] /proc/self/exe: /usr/lib/x86_64-linux-gnu/libcurl.so.4: no version information available (required by /proc/self/exe)
+10:57:18Sober running — waiting for hook… (6s)
+10:57:19[hook] [sober] info: app: lifecycle: app_start delta=5.899369716644287e-05ms
+10:57:19[hook] [sober] info: app: lifecycle: logging_started delta=379.89877900481224ms
+10:57:19[hook] [sober] info: app: app tag: s0126-3212-x86_64-gnu
+10:57:19[hook] [sober] info: app: cpu model: Intel(R) Core(TM) i7-10610U CPU @ 1.80GHz
+10:57:19[hook] [sober] info: app: os release: GNOME
+10:57:19[hook] [sober] info: app: host os release: Manjaro Linux
+10:57:19[hook] [sober] info: app: desktop: KDE (on wayland)
+10:57:19[hook] [sober] info: app: lifecycle: init_app_info delta=0.1399890035390854ms
+10:57:19[hook] [sober] info: window: using C.UTF-8 locale
+10:57:19[hook] [sober] info: app: lifecycle: runtime_handler delta=91.8161889910698ms
+10:57:19[hook] [sober] info: app: lifecycle: update_flags_from_remote_manifest delta=0.033037006855010986ms
+10:57:19[hook] [sober] info: state: using manifest object: {"app_settings":null,"r1":1,"u":1}
+10:57:19[hook] [sober] info: app: lifecycle: fs_init delta=164.46514700353146ms
+10:57:20[hook] [sober] info: app: lifecycle: check_security delta=645.7930509895086ms
+10:57:20check_security seen — seeding hook preload now
+10:57:20[hook] [sober] info: app$json: {"product_name":"HP EliteBook 840 G7 Notebook PC","product_version":"SBKPFV3","type":"device_product_info"}
+10:57:20[hook] [sober] info: app: lifecycle: core_runtime delta=0.08249200880527496ms
+10:57:20[hook] [sober] info: app: lifecycle: app_core delta=417.37217900156975ms
+10:57:20check_security passed — seeding runtime preload…
+10:57:20runtime preload OK (sudo (no password needed)): /var/lib/flatpak/runtime/org.gnome.Platform/x86_64/active/files/etc
+10:57:20runtime preload OK (sudo (no password needed)): /var/lib/flatpak/runtime/org.gnome.Platform/x86_64/active/files/etc
+10:57:20Could not seed pid 156755: EACCES
+10:57:20Seeded hook into pid 156774's filesystem root
+10:57:20Seeded hook into pid 156785's filesystem root
+10:57:20Seeded hook into pid 156902's filesystem root
+10:57:20Seeded hook into pid 156914's filesystem root
+10:57:21pid 156755 /etc/ld.so.preload unreadable (ENOENT)
+10:57:21pid 156755 (bwrap): hook=no loader=no
+10:57:21pid 156774 preload=/tmp/libnebula_hook.so .so=present
+10:57:21pid 156774 (bwrap): hook=no loader=no
+10:57:21pid 156785 preload=/tmp/libnebula_hook.so .so=present
+10:57:21pid 156785 (sober): hook=no loader=yes
+10:57:21pid 156914 preload=/tmp/libnebula_hook.so .so=present
+10:57:21pid 156914 (sober): hook=no loader=yes
+10:57:21[hook] [sober] info: app: lifecycle: devices_init delta=784.2929459959269ms
+10:57:21[hook] [sober] info: app: lifecycle: global_window_init delta=0.014166995882987976ms
+10:57:21[hook] [sober] info: window: global_window_init
+10:57:21[hook] [sober] info: window: Will load Vulkan libs
+10:57:21[hook] [sober] info: window: Loaded Vulkan libs successfully
+10:57:21[hook] [sober] info: window: Will create window; create_hidpi=false, create_vulkan=true, create_opengl=false
+10:57:21[hook] [sober] info: app: lifecycle: gamemode_init delta=45.238243997097015ms
+10:57:21[hook] [sober] info: app: lifecycle: interface_init delta=5.036670997738838ms
+10:57:21[hook] [sober] debug: JNIMain: TelemetryProtocol::setProcessTimeOverride: 2535
+10:57:21[hook] [sober] info: device_params_impls$json: {"device_memory_class_mib":4096,"device_memory_mib":31863,"is_low_ram_device":false,"type":"memory_params"}
+10:57:21[hook] [sober] info: Roblox: [FLog::Output] All use of Roblox services must comply with Roblox's Terms of Use, Privacy Policy, Community Standards, and applicable laws. Processing of User personal information is limited to the purposes expressly permitted therein.
+10:57:21[hook] [sober] info: rbx.JNIRobloxSettings: Setting default app policy file: content/guac/defaultConfigs/GuacDefaultPolicy-GlobalDist.json
+10:57:21[hook] [sober] info: Roblox: 2026-10-12T14:57:21.119Z,0.119104,19684480,6 [FLog::Output] RobloxChannel has been set to production
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.529Z,0.529362,19684480,6 [FLog::AndroidGLView] nativeInitClientSettings
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.573Z,0.573574,19684480,6,Info [DFLog::FlagCache] [FlagCache] Deferring flag cache write to post TTI
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.574Z,0.574744,19684480,6 [FLog::AndroidGLView] nativePostClientSettingsLoadedInitialization3
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.574Z,0.574792,19684480,6 [FLog::ClientRunInfo] RobloxGitHash: af5c46aa1ed540887fe7ae988134fd09967fbc27
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.574Z,0.574818,19684480,6 [FLog::ClientRunInfo] The base url is https://www.roblox.com/
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.574Z,0.574862,19684480,6 [FLog::ClientRunInfo] The channel is production
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576312,19684480,6,Info [DFLog::AppPlatformQoSEmergency] AppPlatformQoSEmergencyHandler was instanced.
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576482,19684480,6,Critical [DFLog::Mimalloc] Mimalloc integration detected, settings:
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576513,19684480,6,Critical [DFLog::Mimalloc] mi_option_show_errors=1
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576538,19684480,6,Info [DFLog::Mimalloc] mi_option_show_stats=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576557,19684480,6,Info [DFLog::Mimalloc] mi_option_verbose=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576574,19684480,6,Critical [DFLog::Mimalloc] mi_option_eager_commit=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576592,19684480,6,Info [DFLog::Mimalloc] mi_option_arena_eager_commit=2
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576611,19684480,6,Info [DFLog::Mimalloc] mi_option_purge_decommits=1
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576629,19684480,6,Info [DFLog::Mimalloc] mi_option_allow_large_os_pages=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576647,19684480,6,Info [DFLog::Mimalloc] mi_option_reserve_huge_os_pages=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576664,19684480,6,Info [DFLog::Mimalloc] mi_option_reserve_huge_os_pages_at=-1
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576681,19684480,6,Info [DFLog::Mimalloc] mi_option_reserve_os_memory=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576698,19684480,6,Info [DFLog::Mimalloc] mi_option_deprecated_segment_cache=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576716,19684480,6,Info [DFLog::Mimalloc] mi_option_deprecated_page_reset=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576733,19684480,6,Info [DFLog::Mimalloc] mi_option_abandoned_page_purge=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576750,19684480,6,Critical [DFLog::Mimalloc] mi_option_purge_delay=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576770,19684480,6,Info [DFLog::Mimalloc] mi_option_deprecated_segment_reset=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576789,19684480,6,Info [DFLog::Mimalloc] mi_option_eager_commit_delay=1
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576808,19684480,6,Info [DFLog::Mimalloc] mi_option_use_numa_nodes=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576825,19684480,6,Info [DFLog::Mimalloc] mi_option_disallow_os_alloc=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576857,19684480,6,Info [DFLog::Mimalloc] mi_option_os_tag=100
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576878,19684480,6,Info [DFLog::Mimalloc] mi_option_max_errors=32
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576898,19684480,6,Info [DFLog::Mimalloc] mi_option_max_warnings=32
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576915,19684480,6,Info [DFLog::Mimalloc] mi_option_deprecated_max_segment_reclaim=10
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576933,19684480,6,Info [DFLog::Mimalloc] mi_option_destroy_on_exit=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.576Z,0.576952,19684480,6,Info [DFLog::Mimalloc] mi_option_arena_reserve=1048576
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577108,19684480,6,Info [DFLog::Mimalloc] mi_option_arena_purge_mult=1
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577139,19684480,6,Info [DFLog::Mimalloc] mi_option_deprecated_purge_extend_delay=1
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577160,19684480,6,Info [DFLog::Mimalloc] mi_option_disallow_arena_alloc=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577178,19684480,6,Info [DFLog::Mimalloc] mi_option_retry_on_oom=400
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577196,19684480,6,Info [DFLog::Mimalloc] mi_option_visit_abandoned=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577213,19684480,6,Info [DFLog::Mimalloc] mi_option_guarded_min=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577240,19684480,6,Info [DFLog::Mimalloc] mi_option_guarded_max=1073741824
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577265,19684480,6,Info [DFLog::Mimalloc] mi_option_guarded_precise=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577283,19684480,6,Info [DFLog::Mimalloc] mi_option_guarded_sample_rate=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577302,19684480,6,Info [DFLog::Mimalloc] mi_option_guarded_sample_seed=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577320,19684480,6,Info [DFLog::Mimalloc] mi_option_page_reclaim_on_free=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577338,19684480,6,Info [DFLog::Mimalloc] mi_option_page_full_retain=2
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577357,19684480,6,Info [DFLog::Mimalloc] mi_option_page_max_candidates=4
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577375,19684480,6,Info [DFLog::Mimalloc] mi_option_max_vabits=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577393,19684480,6,Info [DFLog::Mimalloc] mi_option_pagemap_commit=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577410,19684480,6,Info [DFLog::Mimalloc] mi_option_page_commit_on_demand=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577428,19684480,6,Info [DFLog::Mimalloc] mi_option_page_max_reclaim=-1
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577447,19684480,6,Info [DFLog::Mimalloc] mi_option_page_cross_thread_max_reclaim=32
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.577Z,0.577465,19684480,6,Critical [FLog::Output] Build system id: 1
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.579Z,0.579585,19684480,6,Info [DFLog::RbxTransportIoLibContext] RbxTransport I/O backend chosen: sys
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.579Z,0.579935,19684480,6,Info [DFLog::RbxTransportRnaExp] Initialized RtcIoRna with 1 event loop threads
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.580Z,0.580210,19684480,6,Info [FLog::AppMemUsageStatus] 923286370
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.581Z,0.581641,19684480,6,Warning [FLog::IxpStorageManager] Failed to open cache file for reading
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.581Z,0.581968,19684480,6,Info [FLog::TombstoneCache] [FlagCache] Tombstone 1, expiry 360, holdout false, channel '' (production), read from file: /home/ethanc/.var/app/org.vinegarhq.Sober/cache/sober/cache/tombstone.dat
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.582Z,0.582021,19684480,6,Info [FLog::TombstoneCache] [FlagCache] Setting holdout experiment state to: false
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.582Z,0.582047,19684480,6,Warning [FLog::LocalStorageHandler] Not available on the current platform.
+10:57:22[hook] [sober] debug: rbx.JNIRobloxSettings: nativeInitializeNativeFlags: Registered Flag Provider ID from Java: 0
+10:57:22[hook] [sober] debug: rbx.JNIRobloxSettings: nativeInitializeNativeFlags: flagCount = 0.
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.592Z,0.592229,d59316c0,6,Error [DFLog::SQLite] sqlite3_error_log: 283 - recovered 2372 frames from WAL file /home/ethanc/.var/app/org.vinegarhq.Sober/data/sober/appData/rbx-storage.db-wal
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.593Z,0.593259,d59316c0,6,Critical <log line elided due to exception: precision not allowed for this argument type>
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.594Z,0.594264,19684480,6,Info [FLog::JNIAppBridge] nativeAppBridgeAppStart:
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.606Z,0.606036,19684480,6,Info [FLog::JNIAppBridge] nativeAppBridgeV2Init:
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.606Z,0.606182,805de6c0,6 [FLog::SingleSurfaceApp] initializeWithAppStarter
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.606Z,0.606224,805de6c0,6 [FLog::SingleSurfaceApp] initializeSingleton
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.606Z,0.606336,805de6c0,6 [FLog::Output] setAssetFolder /home/ethanc/.var/app/org.vinegarhq.Sober/data/sober/assets/content/
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.608Z,0.608386,805de6c0,6 [FLog::Output] setExtraAssetFolder /home/ethanc/.var/app/org.vinegarhq.Sober/data/sober/assets/ExtraContent
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.609Z,0.609053,805de6c0,6 [FLog::Output] Evaluating deferred inferred crashes
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.609Z,0.609233,805de6c0,6 [FLog::SingleSurfaceApp] registerForForceOTAUpdateAvailableConnection stage = 0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.628Z,0.628938,805de6c0,6 [FLog::DataModelPatchConfigurer] [_UniversalAppPatch] Load configs for user key: app:3354046920121839740
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.639Z,0.639696,805de6c0,6 [FLog::SingleSurfaceApp] setStage: (stage:Native)
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.639Z,0.639757,805de6c0,6,Warning [FLog::SingleSurfaceApp] instantiate controllers
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.639Z,0.639864,805de6c0,6 [FLog::SurfaceController] SurfaceController[_:1]::SurfaceController, count: 1
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.639Z,0.639902,805de6c0,6,Warning [FLog::SingleSurfaceApp] instantiate experience coordinator
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.640Z,0.640004,805de6c0,6,Info [DFLog::CoordinatorMemoryPressure] Setting memory pressure threshold to none
+10:57:22[hook] [sober] info: app: lifecycle: interface_start delta=553.9182210117579ms
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.641Z,0.641886,19684480,6,Info [FLog::JNIAppBridge] nativeAppBridgeStartLuaAppDM: Calling initializeLuaAppWithLoggedInUser
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.641Z,0.641997,805de6c0,6 [FLog::SingleSurfaceApp] initializeLuaAppWithLoggedInUser: (stage:Native).
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.642Z,0.642040,805de6c0,6 [FLog::SingleSurfaceApp] applyLocale
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.642Z,0.642997,805de6c0,6 [FLog::DataModelPatchConfigurer] [_UniversalAppPatch] Retrieving patch
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.643Z,0.643037,805de6c0,6,Warning [FLog::DataModelPatchConfigurer] getCachedPatch Local Patch DataModelPatchConfig : type=2, assetId=118593852151835, assetVersion=14305, maxAppVersion=741, localAssetURI=rbxasset://models/UniversalApp/UniversalApp.rbxm
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.643Z,0.643069,805de6c0,6,Warning [FLog::DataModelPatchConfigurer] getCachedPatch: config: 118593852151835.14968
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.643Z,0.643132,805de6c0,6,Warning [FLog::DataModelPatchConfigurer] getCachedPatch: numAttemptsRemaining: 1
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.643Z,0.643174,805de6c0,6,Warning [FLog::DataModelPatchConfigurer] getCachedPatchFromConfig: contentId=https://www.roblox.com/asset/?id=118593852151835&version=14968
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.643Z,0.643230,805de6c0,6,Warning [FLog::DataModelPatchConfigurer] getCachedPatch: get patch from local backup cache for Model: 118593852151835.14968
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.643Z,0.643272,805de6c0,6,Warning [FLog::DataModelPatchConfigurer] applying patch from backup cache assetId=118593852151835 assetVersion=14968
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.643Z,0.643369,805de6c0,6 [FLog::DataModelPatchConfigurer] deserializeAndVerifyPatch with blake3
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.649Z,0.649722,5fda86c0,6,Warning [FLog::Output] Hello world, CLI-208683!
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.649Z,0.649807,5fda86c0,6,Warning [FLog::Output] Hello world, CLI-207485!
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.649Z,0.649851,5fda86c0,6,Warning [FLog::Output] Hello again, world 206748!
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.649Z,0.649885,5fda86c0,6,Warning [FLog::Output] Hello world CLI-206426!
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.649Z,0.649916,5fda86c0,6,Warning [FLog::Output] Hello world ...!
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.649Z,0.649946,5fda86c0,6,Warning [FLog::Output] Hello 198367!
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.649Z,0.649974,5fda86c0,6,Warning [FLog::Output] Hello World! **CLI-199819**
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.650Z,0.650004,5fda86c0,6,Warning [FLog::Output] Hello World! CLI-204362
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.650Z,0.650033,5fda86c0,6,Warning [FLog::Output] Hello World! from CLI-206127
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.650Z,0.650063,5fda86c0,6,Warning [FLog::Output] Hello World! CLI210530
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.650Z,0.650092,5fda86c0,6,Warning [FLog::Output] Hello World CLI-212185!
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.650Z,0.650120,5fda86c0,6,Warning [FLog::Output] Hello World! From Da Greatest - CLI213795
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.650Z,0.650152,5fda86c0,6,Warning [FLog::Output] Hello World! CLI-221983
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.650Z,0.650181,5fda86c0,6,Warning [FLog::Output] Hello World! CLI-222132
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.650Z,0.650210,5fda86c0,6,Warning [FLog::Output] Hello World <3 CLI-225598
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.650Z,0.650239,5fda86c0,6,Warning [FLog::Output] Hello World! CLI-226477
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.650Z,0.650268,5fda86c0,6,Warning [FLog::Output] Hello World! CLI-226592
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.771Z,0.771976,effcf6c0,6,Info [FLog::JNIAppBridge] ... StartupController finished starting: stage = 2, BTID = 408217005, upgradeStatus = 3.
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.866Z,0.866529,effcf6c0,6,Info [FLog::PerformanceControlIXP] Is device exposed to experiments: false
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.921Z,0.921361,805de6c0,6,Warning [FLog::SingleSurfaceApp] Register rendering frequency during startup.
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.921Z,0.921538,805de6c0,6,Warning [FLog::RobloxTelemetry] Lua app running status has been updated to true
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.921Z,0.921674,805de6c0,6 [FLog::SingleSurfaceApp] setStage: (stage:InitializedLuaApp)
+10:57:22[hook] [sober] info: app: lifecycle: pre_main_loop delta=279.85011599957943ms
+10:57:22[hook] [sober] info: app: lifecycle: enter_main_loop delta=0.010285988450050354ms
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.922Z,0.922984,19684480,6,Info [FLog::JNIAppBridge] nativeAppBridgeV2UpdateSurfaceAppWithPlatformParams:
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.923Z,0.923060,805de6c0,6 [FLog::SingleSurfaceApp] updateSurfaceLuaApp: (stage:InitializedLuaApp)
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.923Z,0.923103,805de6c0,6,Warning [FLog::SurfaceController] SurfaceController[_:1]::update.
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.923Z,0.923146,19684480,6,Info [FLog::JNIAppBridge] nativeAppBridgeV2UpdateSurfaceGameWithPlatformParams:
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.923Z,0.923197,805de6c0,6 [FLog::SingleSurfaceApp] updateSurfaceUGCGame: (stage:InitializedLuaApp).
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.923Z,0.923420,5fda86c0,6,Info [FLog::CreatorOutput] Info: DataModel Loading rbxasset://places/Mobile.rbxl
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.924Z,0.924409,19684480,6,Info [FLog::JNIAppBridge] nativeAppBridgeV2UpdateSurfaceAppWithPlatformParams:
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.924Z,0.924475,805de6c0,6 [FLog::SingleSurfaceApp] updateSurfaceLuaApp: (stage:InitializedLuaApp)
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.924Z,0.924511,805de6c0,6,Warning [FLog::SurfaceController] SurfaceController[_:1]::update.
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.924Z,0.924552,19684480,6,Info [FLog::JNIAppBridge] nativeAppBridgeV2UpdateSurfaceGameWithPlatformParams:
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.924Z,0.924601,805de6c0,6 [FLog::SingleSurfaceApp] updateSurfaceUGCGame: (stage:InitializedLuaApp).
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.927Z,0.927659,5fda86c0,6,Info [FLog::TestServiceLog] [onServiceProvider] DebugUTPLauncherWebSocketUri='' wsOptIn=0
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.927Z,0.927738,5fda86c0,6,Info [FLog::TestServiceLog] [onServiceProvider] this=0x7f7bce3a1280 dm=0x7f7bca7ddc80 wsOptIn=0 isStudio=0 isServer=0 isPlayClient=0 isNonNetworkEdit=1
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.938Z,0.938881,5fda86c0,6,Info [FLog::ExtractPackageDefinition] No captured package definitions to restore
+10:57:22[hook] [sober] info: Roblox: 2026-10-12T14:57:21.939Z,0.939445,5fda86c0,6 [FLog::DataModelPatchConfigurer] OTAPollingEnabled set to: true
+10:57:22[hook] [sober] info: app_interface$json: {"place_id":"0","type":"game_loaded"}
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.406Z,1.406940,4c016c0,6 [FLog::SessionTransitionFSM] Initialized.
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.412Z,1.412142,4c016c0,6,Warning [DFLog::DMNotificationMonitor] DM notification received. Type 10
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.425Z,1.425344,4c016c0,6,Warning [FLog::DesignFoundationsCore] clearTokens: no platform implementation registered.
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.481Z,1.481504,4c016c0,6,Warning [DFLog::DMNotificationMonitor] DM notification received. Type 10
+10:57:23[hook] [sober] info: app_interface$json: {"type":"will_handle_app_startup"}
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.482Z,1.482246,19684480,6,Info [FLog::JNIAppBridge] nativeAppBridgeV2StartApp:
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.482Z,1.482342,805de6c0,6 [FLog::SingleSurfaceApp] startLuaApp: (stage:InitializedLuaApp).
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.482Z,1.482408,805de6c0,6 [FLog::SingleSurfaceApp] returnToLuaApp: (stage:InitializedLuaApp).
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.482Z,1.482453,805de6c0,6 [FLog::SingleSurfaceApp] returnToLuaAppInternal: ... App has been initialized, returning from game.
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.482Z,1.482500,805de6c0,6 [FLog::SurfaceController] [_:1]::replaceDataModel: (stage:0, window = 0x555d5f4ddc90) [tid:0x7f7a805de6c0]
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.482Z,1.482596,805de6c0,6,Warning [FLog::Graphics] RenderView created[1]
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.512Z,1.512590,805de6c0,6 [FLog::Graphics] Vulkan: Using extension: VK_KHR_surface
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.512Z,1.512671,805de6c0,6 [FLog::Graphics] Vulkan: Using extension: VK_KHR_get_physical_device_properties2
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.512Z,1.512712,805de6c0,6 [FLog::Graphics] Vulkan: Using extension: VK_KHR_android_surface
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.563Z,1.563575,effcf6c0,6,Info [FLog::PerformanceControlIXP] Is device exposed to experiments: false
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.580Z,1.580711,805de6c0,6 [FLog::Graphics] Vulkan: Device llvmpipe (LLVM 22.1.8, 256 bits) is emulated, skipping
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.580Z,1.580794,805de6c0,6 [FLog::Graphics] Vulkan: Device llvmpipe (LLVM 22.1.8, 256 bits) is emulated, skipping
+10:57:23[hook] [sober] info: vulkan: using native driver ETC2 support
+10:57:23[hook] [sober] info: vk_memory_allocator: Using memory budget extensions
+10:57:23[hook] [sober] info: compute_manager: device supports push descriptors: YES
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.597Z,1.597579,805de6c0,6 [FLog::Graphics] Vulkan Android Device:
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.597Z,1.597824,805de6c0,6,Warning [FLog::Graphics] ':Intel(R) UHD Graphics (CML GT2):109060098' - PowerVR caps: vendorId=32902 supportsTextureMSAA=true supportsHQShaders=true supportsDiscardWithAlphaToCoverage=true
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.597Z,1.597906,805de6c0,6 [FLog::Graphics] VULKAN heapIndex = 0, heapFlags = 1 (device), heapSize = 3583519744
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.597Z,1.597953,805de6c0,6 [FLog::Graphics] VULKAN unifiedMemory = true, device memory = 25058356224, host memory = 0, setting caps.videoMemory = 67108864
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.597Z,1.597999,805de6c0,6 [FLog::Graphics] Vulkan Device: Intel(R) UHD Graphics (CML GT2)
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598029,805de6c0,6 [FLog::Graphics] Vulkan Device: Vendor 8086 Device 9b41
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598059,805de6c0,6 [FLog::Graphics] Vulkan Device: Driver 26.2.2 (109060098)
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598090,805de6c0,6 [FLog::Graphics] Vulkan Device: API 1.4.354
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598120,805de6c0,6 [FLog::Graphics] Caps: passFloatsLimit 1073741824
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598147,805de6c0,6 [channel] Caps: ThreadSafe 1 Framebuffer 1 FpFramebuffer 1 Shaders 1 Compute 1 Instancing 1 PerInstanceStream 1 ConstBuffers 1
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598179,805de6c0,6 [channel] Caps: Framebuffer: MRT 4 MSAA 16 Stencil 1
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598205,805de6c0,6 [channel] Caps: Framebuffer: Depth16 1 Depth24 1 DepthFloat 1 DepthClamp 1
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598233,805de6c0,6 [channel] Caps: Border Color 1
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598259,805de6c0,6 [channel] Caps: Texture: RGB10A2 1 RG11B10F 1 R16I 1
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598288,805de6c0,6 [channel] Caps: Texture: BC6H 1 ASTC HDR 0
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598320,805de6c0,6 [channel] Caps: Texture: DXT 1 PVR 0 ETC1 1 ETC2 1 Half 1
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598354,805de6c0,6 [channel] Caps: Texture: 3D 1 Array 1 Depth 1 MSAA 1 MSAAFP16 16
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598385,805de6c0,6 [channel] Caps: Texture: NPOT 1 PartialMips 1 CubeMipGen 1 CubeFramebuffer 1
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598415,805de6c0,6 [channel] Caps: Texture: Size 16384 Units 32 VertexUnits 32
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598445,805de6c0,6 [channel] Caps: ConstantBufferSize 16384
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598473,805de6c0,6 [channel] Caps: isAppleGPU 0
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598501,805de6c0,6 [channel] Caps: 32bIdx 1 Memoryless 0
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.598Z,1.598529,805de6c0,6 [channel] Caps: RTFlip 0 MinusOneToOneDepth 0
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.602Z,1.602106,805de6c0,6 [FLog::Graphics] Vulkan: Loaded pipeline cache (3186511 bytes, hash 473eeecb)
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.621Z,1.621094,805de6c0,6 [FLog::Graphics] Vulkan: creating framebuffer 1920x1013
+10:57:23[hook] [sober] info: vulkan: create swapchain with w 1920 h 1013
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.626Z,1.626714,805de6c0,6 [FLog::Graphics] Vulkan: swapchain images 4 present mode 0 format 37 size 1920x1013
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.627Z,1.627654,805de6c0,6 [FLog::Graphics] Video memory size: 67108864
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.628Z,1.628917,4c016c0,6,Warning [FLog::CreatorWarning] Warning: [Roblox][CorePackages.LuauForgeChunks.bundled] HTTP error url:`https://apis.roblox.com/attribution/v1/events/post-authentication`
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.629Z,1.629038,4c016c0,6,Warning [FLog::CreatorWarning] Warning: [Roblox][CorePackages.LuauForgeChunks.bundled] HTTP error code:`nil`
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.629Z,1.629104,4c016c0,6,Warning [FLog::CreatorWarning] Warning: [Roblox][CorePackages.LuauForgeChunks.bundled] HTTP error body:`nil`
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.690Z,1.690391,61a086c0,6,Warning [DFLog::DMNotificationMonitor] DM notification received. Type 28
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.806Z,1.806155,805de6c0,6,Warning [FLog::Graphics] Loaded 2991 shaders from pack vulkan_mobile variant default (17713871 bytes)
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.806Z,1.806219,805de6c0,6,Warning [FLog::Graphics] Compiled 1079 shaders in 178 ms. Is Multi-Threaded Loading: true. Shader Loading Threads: 8 (TaskScheduler: 8, Requested: 8, HardMax: 8).
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.808Z,1.808761,805de6c0,6,Warning [FLog::Graphics] TM2: retry:false
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.809Z,1.809491,805de6c0,6,Warning [FLog::Graphics] TM2: maxCloudAssetDimension: 4096
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.809Z,1.809529,805de6c0,6 [FLog::Graphics] Using TM2 in MipPackStream mode
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.809Z,1.809554,805de6c0,6,Warning [FLog::Graphics] Using TexturePackGenerator.
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.809Z,1.809573,805de6c0,6,Warning [FLog::Graphics] LightGrid is unified
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.810Z,1.810404,4c016c0,6,Warning [DFLog::DMNotificationMonitor] DM notification received. Type 10
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.810Z,1.810536,4c016c0,6,Warning [DFLog::DMNotificationMonitor] DM notification received. Type 10
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.810Z,1.810618,4c016c0,6,Warning [DFLog::DMNotificationMonitor] DM notification received. Type 10
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.816Z,1.816836,805de6c0,6,Warning [FLog::Graphics] DRS init: denied=false fullSizeFramebufferDenied=false canUseHighDPIFullFB=true
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.820Z,1.820077,805de6c0,6 [FLog::SurfaceController] SurfaceController::disableVR
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.820Z,1.820169,805de6c0,6,Warning [FLog::SurfaceController] SurfaceController[_:1]::initialize
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.820Z,1.820236,805de6c0,6 [FLog::SurfaceController] SurfaceController[_:1]::start dataModel(0x7f7bcd49b930)
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.820Z,1.820307,805de6c0,6 [FLog::SurfaceController] SurfaceController::RenderJob[_:1]::RenderJob
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.820Z,1.820352,805de6c0,6,Warning [FLog::SurfaceController] SurfaceController::RenderJob::setStartupThrottle: true
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.820Z,1.820383,805de6c0,6 [FLog::SurfaceController] SurfaceController[_:1]::run dataModel(0x7f7bcd49b930)
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.820Z,1.820445,805de6c0,6,Warning [FLog::RobloxTelemetry] Lua app running status has been updated to true
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.820Z,1.820576,805de6c0,6 [FLog::SingleSurfaceApp] setStage: (stage:LuaApp)
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.820Z,1.820771,805de6c0,6 [FLog::SingleSurfaceApp] userDidLogin
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.820Z,1.820798,805de6c0,6 [FLog::SingleSurfaceApp] applyLocale
+10:57:23[hook] [sober] debug: rbx.appshell.report: NRI.setAppSuspended(false)
+10:57:23[hook] [sober] info: Roblox: 2026-10-12T14:57:22.820Z,1.820886,19684480,6 [FLog::AndroidGLView] rbx.datamodel: setTaskSchedulerBackgroundMode() enable:false context:ASMA.start
+10:57:24[hook] [sober] info: app_interface$json: {"type":"did_handle_app_startup"}
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:22.985Z,1.985734,4c016c0,6 [FLog::DataModelPatchConfigurer] [_UniversalAppPatch] Update OTA config
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:22.986Z,1.986024,4c016c0,6 [FLog::DataModelPatchConfigurer] Schedule OTA polling 3600 seconds from now.
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:22.986Z,1.986333,4c016c0,6 [FLog::DataModelPatchConfigurer] [_InExperiencePatch] Load configs for user key: app:3354046920121839740
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:22.991Z,1.991809,4c016c0,6 [FLog::DataModelPatchConfigurer] [_InExperiencePatch] Update OTA config
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:22.992Z,1.992105,4c016c0,6 [FLog::DataModelPatchConfigurer] Schedule OTA polling 3600 seconds from now.
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:22.992Z,1.992154,4c016c0,6,Info [DFLog::FlagCache] [FlagCache] Writing pending flag cache to disk
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:22.992Z,1.992978,5fda86c0,6,Info [DFLog::FlagCache] [FlagCache] writeFlagCache: Writing flag cache file to : /home/ethanc/.var/app/org.vinegarhq.Sober/cache/sober/cache/flag_cache.dat
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:22.993Z,1.993235,5fda86c0,6,Debug [DFLog::FlagCache] [FlagCache] writeFlagCache: Wrote signatureSize: 0
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:22.993Z,1.993284,5fda86c0,6,Debug [DFLog::FlagCache] [FlagCache] writeFlagCache: Wrote signature of length 0. Signature: <signature too short to display>...
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:22.993Z,1.993328,5fda86c0,6,Debug [DFLog::FlagCache] [FlagCache] writeFlagCache: Wrote compression type: 1
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:22.993Z,1.993367,5fda86c0,6,Info [DFLog::FlagCache] [FlagCache] writeFlagCache: Compressing flag cache data (input size: 1385912 bytes)
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.011Z,2.011746,5fda86c0,6,Info [DFLog::FlagCache] [FlagCache] writeFlagCache: Compression complete. Output size: 350141 bytes, ratio: 3.96x, time: 18ms
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.012Z,2.012273,5fda86c0,6,Info [DFLog::FlagCache] [FlagCache] writeFlagCache: Successfully wrote 350146 bytes to file: /home/ethanc/.var/app/org.vinegarhq.Sober/cache/sober/cache/flag_cache.dat, time: 19.295277000000112ms
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.012Z,2.012717,60a056c0,6,Info [FLog::TombstoneCache] [FlagCache] Tombstone 1, expiry time 360, holdout false, channel '' (production), written to file: /home/ethanc/.var/app/org.vinegarhq.Sober/cache/sober/cache/tombstone.dat
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.045Z,2.045136,5fda86c0,6 [telemetryLog] Sending 'GmasdkInstantInstallIxpReadCounter' to ''
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.064Z,2.064819,4c016c0,6,Warning [FLog::SingleSurfaceApp] Restoring rendering frequency to normal.
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.064Z,2.064888,4c016c0,6,Warning [FLog::SurfaceController] SurfaceController::RenderJob::setStartupThrottle: false
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.092Z,2.092599,60e066c0,6,Info [DFLog::RbxTransportIoLibContext] RbxTransport I/O backend chosen: sys
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.220Z,2.220594,effcf6c0,6 [FLog::DataModelPatchConfigurer] [_UniversalAppPatch] Update OTA succeeded
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.222Z,2.222412,effcf6c0,6,Info [FLog::AssetsManifestManager] Checking existence of OTA Assets Manifest with OTA Config Name '118593852151835.14968' in RbxStorage: Found
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.222Z,2.222566,effcf6c0,6 [FLog::DataModelPatchConfigurer] [_UniversalAppPatch] Update OTA config deployed
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.222Z,2.222601,effcf6c0,6 [FLog::DataModelPatchConfigurer] [_UniversalAppPatch] OTA config updated, checking patch
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.222Z,2.222649,effcf6c0,6 [FLog::DataModelPatchConfigurer] [_UniversalAppPatch] Updated OTA config already cached.
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.243Z,2.243441,effcf6c0,6 [FLog::DataModelPatchConfigurer] [_InExperiencePatch] Update OTA succeeded
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.244Z,2.244447,effcf6c0,6,Info [FLog::AssetsManifestManager] Checking existence of OTA Assets Manifest with OTA Config Name '80471914653504.14878' in RbxStorage: Found
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.244Z,2.244565,effcf6c0,6 [FLog::DataModelPatchConfigurer] [_InExperiencePatch] Update OTA config deployed
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.244Z,2.244598,effcf6c0,6 [FLog::DataModelPatchConfigurer] [_InExperiencePatch] OTA config updated, checking patch
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.244Z,2.244634,effcf6c0,6 [FLog::DataModelPatchConfigurer] [_InExperiencePatch] Updated OTA config already cached.
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.289Z,2.289035,4c016c0,6 [FLog::SurfaceController] SurfaceController::RenderJob::stepDataModelJob: No DM yet. Continue...
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.289Z,2.289169,805de6c0,6 [FLog::SurfaceController] SurfaceController::RenderJob::scheduleRender: No data model. Bind workspace now...
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.289Z,2.289224,805de6c0,6,Warning [FLog::Graphics] TM2: maxCloudAssetDimension: 4096
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.307Z,2.307898,805de6c0,6 [FLog::Graphics] Vulkan: resizing window framebuffer to 1920x1013
+10:57:24[hook] [sober] info: vulkan: create swapchain with w 1920 h 1013
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.311Z,2.311168,805de6c0,6 [FLog::Graphics] Vulkan: swapchain images 4 present mode 0 format 37 size 1920x1013
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.311Z,2.311505,805de6c0,6 [FLog::Graphics] Future is bright shadows
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.313Z,2.313497,805de6c0,6 [FLog::Graphics] LayeredClothingMode updated: LC=1 HSR=1
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.315Z,2.315473,805de6c0,6 [FLog::Graphics] Terrain TextureAtlas 4096x2048, tileCount: 7x6, tileSize: 256x256, border: 32, mip: 4
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.322Z,2.322633,805de6c0,6 [FLog::Graphics] SceneManager: resizing main targets to 1920x1013
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.378Z,2.378019,612076c0,6 [FLog::Error] Asset (Image) "rbxthumb://type=AvatarHeadShot&id=&w=48&h=48&filters=circular&includebackground=true&includeprofileframe=true" load failed: Error parsing batch thumbnail request, invalid format
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.383Z,2.383406,805de6c0,6 [FLog::Error] Asset (Image) "rbxthumb://type=AvatarHeadShot&id=&w=48&h=48&filters=circular&includebackground=true&includeprofileframe=true" load failed: Invalid image or texture.
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.417Z,2.417772,43cd96c0,6,Info [DFLog::RbxTransportStunPopProbe] TURN seed: 24 PoPs (carried 0, fresh 24)
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.536Z,2.536361,4c016c0,6 [FLog::SessionTransitionFSM] Session history: IAIAIAAIASPASPASPIASPASPIASPIAAA
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.537Z,2.537204,4c016c0,6 [FLog::SessionTransitionFSM] Entered app session.
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.604Z,2.604453,60e066c0,6 [FLog::Error] Asset (Image) "rbxthumb://type=AvatarHeadShot&id=-1&w=48&h=48&filters=circular&includebackground=true&includeprofileframe=true" load failed: The requested Ids are invalid, of an invalid type or missing.
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.606Z,2.606586,effcf6c0,6,Debug [FLog::AndroidAppUpdate] User is not in a channel
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.660Z,2.660787,805de6c0,6 [FLog::Error] Asset (Image) "rbxthumb://type=AvatarHeadShot&id=-1&w=48&h=48&filters=circular&includebackground=true&includeprofileframe=true" load failed: Invalid image or texture.
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:23.918Z,2.918114,43cd96c0,6,Info [DFLog::RbxTransportStunPopProbe] burst: 24 sent, 0 failed
+10:57:24Sober running — waiting for hook… (11s)
+10:57:24[hook] [sober] info: Roblox: 2026-10-12T14:57:24.418Z,3.418279,43cd96c0,6,Info [DFLog::RbxTransportStunPopProbe] burst: 24 sent, 0 failed
+10:57:24No new process to preload — injecting into the running Sober…
+10:57:24Relaxing yama ptrace_scope 1 → 0 for the injection…
+10:57:24ptrace_scope relaxed (sudo (no password needed)).
+10:57:24ptrace_scope restored to 1.
+10:57:24[nebula-inject] attempting pid 156914…
+10:57:24[nebula-inject] attempting pid 156785…
+10:57:24[nebula-inject] pid 156914: ATTACH denied (EPERM) - ptrace_scope blocks attaching to a non-child process
+10:57:24[nebula-inject] pid 156785: GETREGS: No such process (os error 3)
+10:57:25Sober exited early — the [sober] lines above show why.
