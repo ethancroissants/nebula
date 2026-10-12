@@ -111,6 +111,27 @@ function findAttachScript() {
   return null;
 }
 
+// Where the flatpak runtime's /etc could live (user + system installs).
+// glibc reads <sandbox>/etc/ld.so.preload at every process start inside the
+// sandbox, which is how we make the hook survive Sober's env-scrubbing stub.
+function runtimeEtcDirs() {
+  const dirs = [];
+  // user runtime installs
+  dirs.push(path.join(os.homedir(), '.local/share/flatpak/runtime/org.gnome.Platform'));
+  // system runtime installs
+  dirs.push('/var/lib/flatpak/runtime/org.gnome.Platform');
+  // walk the known x86_64 runtime dirs and return their etc/ paths
+  const out = [];
+  for (const base of dirs) {
+    try {
+      for (const entry of fs.readdirSync(base)) {
+        out.push(path.join(base, entry, 'active', 'files', 'etc'));
+      }
+    } catch {}
+  }
+  return out;
+}
+
 function loadPrefs() {
   try {
     return JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8'));
@@ -167,6 +188,26 @@ async function applyOverride(hookLib) {
   const libRes = await run(`flatpak override --user --filesystem="${libDir}:ro" ${APP_ID}`, 15000);
 
   const envRes = await run(`flatpak override --user --env=LD_PRELOAD="${hookLib}" ${APP_ID}`, 15000);
+
+  // BELT & SUSPENDERS: Sober's launcher is UPX-style packed and its stub
+  // scrubs the environment on its internal re-exec — LD_PRELOAD reaches the
+  // launcher process but is gone by the time the actual game process starts
+  // (that's the "attached, then back to linking" symptom). glibc's
+  // /etc/ld.so.preload lives inside the sandbox's /etc (sourced from the
+  // flatpak runtime, which is user-writable on user installs), and it applies
+  // to EVERY process launched in the sandbox regardless of environment.
+  let preloadRes = { ok: true };
+  try {
+    const rtDirs = runtimeEtcDirs();
+    for (const etc of rtDirs) {
+      try {
+        fs.mkdirSync(etc, { recursive: true });
+        fs.writeFileSync(path.join(etc, 'ld.so.preload'), `${hookLib}\n`);
+        break; // first writable runtime wins
+      } catch {}
+    }
+  } catch {}
+  void preloadRes;
 
   if (fsRes.ok && envRes.ok && libRes.ok) {
     // Verify the override actually stuck before launching.
@@ -347,11 +388,23 @@ ipcMain.handle('nebula:launchAndInject', async () => {
     while (Date.now() < deadline) {
       await sleep(700);
       const elapsed = Math.round((Date.now() - started) / 1000);
+      // Ground truth = the hook's own heartbeat: ATTACHED only after it
+      // captures the game's lua_State (immune to launcher-process confusion).
+      try {
+        const status = fs.readFileSync(path.join(QUEUE_DIR, 'status'), 'utf8').trim();
+        if (status === 'ATTACHED') {
+          sendProgress('injected', 'Injected — captured Luau VM.');
+          return { ok: true, injected: true };
+        }
+      } catch {}
       procs = await findSoberProcesses();
       if (procs.length === 0) continue;
       if (procs.some((p) => procHasHook(p.pid))) {
-        sendProgress('injected', 'Injected — ready to execute.');
-        return { ok: true, injected: true };
+        if (Date.now() - lastNotice > 5000) {
+          lastNotice = Date.now();
+          sendProgress('waiting', `Hook .so mapped — waiting for VM capture… (${elapsed}s)`);
+        }
+        continue;
       }
       if (Date.now() - lastNotice > 5000) {
         lastNotice = Date.now();
@@ -378,24 +431,27 @@ async function getHookStatus() {
   const procs = await findSoberProcesses();
   if (procs.length === 0) return { state: 'idle', message: 'Sober not running' };
 
-  for (const proc of procs) {
-    if (procHasHook(proc.pid)) {
-      return { state: 'attached', message: `Hook loaded (pid ${proc.pid})` };
-    }
-  }
-
-  // The hook writes a heartbeat to queue/status once its worker thread runs:
-  //   WAITING  = .so loaded, waiting for the Luau VM to appear
-  //   ATTACHED = lua_State captured — scripts will execute
+  // Heartbeat from the hook's worker thread — the ONLY trustworthy signal:
+  //   ATTACHED = lua_State captured (the .so is in the actual game process)
+  //   WAITING  = .so loaded somewhere, but the Luau VM hasn't been captured yet
   try {
     const status = fs.readFileSync(path.join(QUEUE_DIR, 'status'), 'utf8').trim();
     if (status === 'ATTACHED') {
-      return { state: 'attached', message: 'Hook reported attached' };
+      return { state: 'attached', message: 'Captured Luau VM — ready' };
     }
     if (status === 'WAITING') {
       return { state: 'waiting', message: 'Hook loaded — waiting for Luau VM' };
     }
   } catch {}
+
+  // No heartbeat yet. If the maps show the .so loaded it may be in the
+  // launcher process only (its stub re-execs and drops LD_PRELOAD), so don't
+  // report a false "attached" — report it as a warm-up phase instead.
+  for (const proc of procs) {
+    if (procHasHook(proc.pid)) {
+      return { state: 'waiting', message: 'Hook .so mapped — waiting for VM capture' };
+    }
+  }
 
   return { state: 'waiting', message: 'Sober running, hook not yet loaded' };
 }
