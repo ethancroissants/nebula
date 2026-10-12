@@ -22,6 +22,7 @@ const els = {
   btnSave: $('btn-save'),
   fontSizeSelect: $('font-size-select'),
   cbAutoAttach: $('cb-auto-attach'),
+  cbSafeMode: $('cb-safe-mode'),
   editor: $('script-editor'),
   editorStatus: $('editor-status'),
   editorStats: $('editor-stats'),
@@ -32,7 +33,7 @@ const els = {
 };
 
 let state = {
-  prefs: { autoAttach: true, fontSize: 13 },
+  prefs: { autoAttach: true, fontSize: 13, safeMode: false },
   procs: [],
   override: '',
   soberInstalled: false,
@@ -119,6 +120,7 @@ async function refresh() {
   setPill(kind, hs.state === 'attached' ? 'Attached' : hs.state === 'waiting' ? 'Linking…' : 'Idle');
 
   els.cbAutoAttach.checked = !!state.prefs.autoAttach;
+  els.cbSafeMode.checked = !!state.prefs.safeMode;
   els.fontSizeSelect.value = String(state.prefs.fontSize);
   els.editor.style.fontSize = `${state.prefs.fontSize}px`;
 }
@@ -295,6 +297,12 @@ els.cbAutoAttach.addEventListener('change', async () => {
   state.prefs.autoAttach = els.cbAutoAttach.checked;
   await window.nebula.savePrefs(state.prefs);
   log(`Auto-override ${state.prefs.autoAttach ? 'enabled' : 'disabled'}`);
+});
+
+els.cbSafeMode.addEventListener('change', async () => {
+  state.prefs.safeMode = els.cbSafeMode.checked;
+  await window.nebula.savePrefs(state.prefs);
+  log(`Safe mode ${state.prefs.safeMode ? 'ON — launches Sober without the hook' : 'off'}`);
 });
 
 els.btnClearConsole.addEventListener('click', () => {

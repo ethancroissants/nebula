@@ -427,6 +427,15 @@ ipcMain.handle('nebula:launchAndInject', async () => {
       }
     }
 
+    // 2. Safe mode? Launch Sober untouched — no override, no seeding.
+    if (prefs.safeMode) {
+      sendProgress('launching', 'Safe mode: launching Sober without hook…');
+      const child = spawn('flatpak', ['run', APP_ID], { detached: true, stdio: 'ignore' });
+      child.unref();
+      sendProgress('log', 'Sober launched in safe mode (no hook). If it still crashes, the crash is NOT caused by Nebula.');
+      return { ok: true, injected: false, safeMode: true };
+    }
+
     // 2. Apply + verify the sandbox override
     sendProgress('preparing', 'Applying sandbox override…');
     const override = await applyOverride(hookLib);
@@ -436,10 +445,51 @@ ipcMain.handle('nebula:launchAndInject', async () => {
       return { ok: false, error: override.error || 'override failed' };
     }
 
-    // 3. Launch Sober detached (never block on it — this was the old hang)
+    // 2b. Safe mode = don't seed /etc/ld.so.preload at all.
+    const seedingEnabled = !prefs.safeMode;
+
+    // 3. Launch Sober detached, but capture its stderr — Sober's crash
+    // output (panics, libbadcpu FATALs, loader errors) goes there and is
+    // the only way to see WHY it dies. Written to a file (never a pipe that
+    // dies with Nebula and SIGPIPE-crashes Sober) and relayed live.
     sendProgress('launching', 'Launching Sober…');
-    const child = spawn('flatpak', ['run', APP_ID], { detached: true, stdio: 'ignore' });
+    const soberLogPath = path.join(NEBULA_ROOT, 'sober-stderr.log');
+    try { fs.writeFileSync(soberLogPath, ''); } catch {}
+    const soberLog = fs.openSync(soberLogPath, 'a');
+    const child = spawn('flatpak', ['run', APP_ID], { detached: true, stdio: ['ignore', 'ignore', soberLog] });
     child.unref();
+    let soberSeen = 0;
+    let soberDead = false;
+    const soberTail = () => {
+      try {
+        const data = fs.readFileSync(soberLogPath, 'utf8');
+        if (data.length >= soberSeen) {
+          const chunk = data.slice(soberSeen);
+          soberSeen = data.length;
+          return chunk;
+        }
+        soberSeen = 0;
+      } catch {}
+      return '';
+    };
+    const crashPoll = setInterval(() => {
+      const chunk = soberTail();
+      for (const line of chunk.split('\n')) {
+        if (line.trim()) sendProgress('hooklog', `[sober] ${line}`);
+      }
+      // Is the flatpak process still alive?
+      try {
+        process.kill(child.pid, 0);
+      } catch {
+        if (!soberDead) {
+          soberDead = true;
+          clearInterval(crashPoll);
+          if (Date.now() < deadline) {
+            sendProgress('error', 'Sober exited early — the [sober] lines above show why.');
+          }
+        }
+      }
+    }, 600);
 
     // 4. Poll for the hook inside the game process (map of wait phase → dot)
     sendProgress('waiting', 'Waiting for Sober to start…');
@@ -466,18 +516,16 @@ ipcMain.handle('nebula:launchAndInject', async () => {
       const anyHook = procs.some((p) => procHasHook(p.pid));
 
       // Seed /etc/ld.so.preload into EVERY Sober process's filesystem view.
-      // The game process may run in a chroot prepared by Sober's loader, with
-      // its own /etc — the flatpak-runtime preload we wrote at apply time
-      // doesn't exist there. Writing via /proc/<pid>/root covers both the
-      // sandbox root and any chroot the game ends up in. The .so is copied
-      // next to it so the preload path always resolves inside that root.
-      for (const proc of procs) {
-        if (seededRoots.has(proc.pid)) continue;
-        const ok = seedHookIntoProcRoot(proc.pid, hookLib);
-        // Cache failures too so we don't spam the console every 700 ms.
-        seededRoots.add(proc.pid);
-        if (ok) {
-          sendProgress('log', `Seeded hook into pid ${proc.pid}'s filesystem root`);
+      // (Skipped in safe mode — no hook anywhere.)
+      if (seedingEnabled) {
+        for (const proc of procs) {
+          if (seededRoots.has(proc.pid)) continue;
+          const ok = seedHookIntoProcRoot(proc.pid, hookLib);
+          // Cache failures too so we don't spam the console every 700 ms.
+          seededRoots.add(proc.pid);
+          if (ok) {
+            sendProgress('log', `Seeded hook into pid ${proc.pid}'s filesystem root`);
+          }
         }
       }
 
@@ -517,10 +565,13 @@ ipcMain.handle('nebula:launchAndInject', async () => {
     }
 
     sendProgress('timeout', 'Sober launched, but hook not detected yet.');
+    clearInterval(crashPoll);
     return { ok: true, injected: false, error: 'hook not detected within timeout' };
   } catch (err) {
     sendProgress('error', `Launch failed: ${err}`);
     return { ok: false, error: String(err) };
+  } finally {
+    try { clearInterval(crashPoll); } catch {}
   }
 });
 
