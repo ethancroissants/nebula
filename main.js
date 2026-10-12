@@ -860,7 +860,7 @@ ipcMain.handle('nebula:launchAndInject', async () => {
               if (!probe.ok && /EPERM/.test(probe.stderr || '')) {
                 sendProgress('preparing', 'probe needs admin rights — requesting…');
                 probe = await withYamaRelaxed(() =>
-                  run(`"${inj}" /tmp/libnebula_hook.so --attach-only --yama-relaxed`, 20000),
+                  run(`"${inj}" /tmp/libnebula_hook.so --attach-only --yama-relaxed --in-userns`, 20000),
                 );
               }
               show(probe, 'probe');
@@ -888,7 +888,7 @@ ipcMain.handle('nebula:launchAndInject', async () => {
                 // it never tries to sudo on its own.
                 sendProgress('preparing', 'ptrace refused — requesting admin rights…');
                 res = await withYamaRelaxed(() =>
-                  run(`"${inj}" /tmp/libnebula_hook.so --yama-relaxed`, 30000),
+                  run(`"${inj}" /tmp/libnebula_hook.so --yama-relaxed --in-userns`, 30000),
                 );
                 // Show this attempt too: overwriting `res` silently threw
                 // away the first attempt's diagnostics, which is exactly the
