@@ -284,6 +284,94 @@ pub fn elf_dynsym_lookup(data: &[u8], symbol: &[u8]) -> Option<u64> {
     None
 }
 
+/// Does the ELF file at `path` export `symbol` in its dynamic symbol table?
+///
+/// Streams only the headers/sections it needs (never reads a whole 200 MB
+/// Roblox blob into memory), and — unlike `dlopen` probing — touches no loader
+/// state, so it is safe to call while the host is mid-startup.
+pub fn elf_file_exports(path: &str, symbol: &[u8]) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(mut f) = fs::File::open(path) else { return false };
+    let mut ehdr = [0u8; 64];
+    if f.read_exact(&mut ehdr).is_err() || &ehdr[0..4] != b"\x7fELF" || ehdr[4] != 2 {
+        return false; // not a 64-bit ELF
+    }
+    let rd_u16 = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
+    let rd_u32 = |b: &[u8], o: usize| {
+        u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+    };
+    let rd_u64 = |b: &[u8], o: usize| {
+        u64::from_le_bytes([
+            b[o], b[o + 1], b[o + 2], b[o + 3], b[o + 4], b[o + 5], b[o + 6], b[o + 7],
+        ])
+    };
+
+    let e_shoff = rd_u64(&ehdr, 0x28);
+    let e_shentsize = rd_u16(&ehdr, 0x3A) as u64;
+    let e_shnum = rd_u16(&ehdr, 0x3C) as u64;
+    if e_shentsize < 64 || e_shnum == 0 {
+        return false;
+    }
+
+    // Read the section header table in chunks (some stripped ELFs are huge).
+    let mut shdrs = vec![0u8; (e_shentsize * e_shnum) as usize];
+    if f.seek(SeekFrom::Start(e_shoff)).is_err() || f.read_exact(&mut shdrs).is_err() {
+        return false;
+    }
+
+    // Find SHT_DYNSYM (11); its sh_link indexes the string table.
+    let mut dynsym = None;
+    for i in 0..e_shnum {
+        let h = (i * e_shentsize) as usize;
+        if rd_u32(&shdrs, h + 4) == 11 {
+            dynsym = Some((
+                rd_u64(&shdrs, h + 0x18),
+                rd_u64(&shdrs, h + 0x20),
+                rd_u32(&shdrs, h + 0x28) as u64,
+            ));
+            break;
+        }
+    }
+    let Some((sym_off, sym_size, str_idx)) = dynsym else { return false };
+    if str_idx >= e_shnum {
+        return false;
+    }
+    let h = (str_idx * e_shentsize) as usize;
+    let str_off = rd_u64(&shdrs, h + 0x18);
+    let str_size = rd_u64(&shdrs, h + 0x20);
+    if str_size > 8 * 1024 * 1024 {
+        return false; // implausible string table — bail
+    }
+
+    let mut strtab = vec![0u8; str_size as usize];
+    if f.seek(SeekFrom::Start(str_off)).is_err() || f.read_exact(&mut strtab).is_err() {
+        return false;
+    }
+
+    let mut symtab = vec![0u8; sym_size as usize];
+    if f.seek(SeekFrom::Start(sym_off)).is_err() || f.read_exact(&mut symtab).is_err() {
+        return false;
+    }
+
+    for s in symtab.chunks_exact(24) {
+        let st_name = rd_u32(s, 0) as usize;
+        let st_shndx = rd_u16(s, 6);
+        let st_value = rd_u64(s, 8);
+        if st_shndx == 0 || st_value == 0 {
+            continue;
+        }
+        let Some(name) = strtab.get(st_name..).and_then(|r| r.split(|&b| b == 0).next())
+        else {
+            continue;
+        };
+        if name == symbol {
+            return true;
+        }
+    }
+    false
+}
+
 /// Inject `dlopen(lib_path, RTLD_NOW)` into the running process `pid`.
 ///
 /// Returns `Ok(true)` when the remote dlopen returned a non-null handle,

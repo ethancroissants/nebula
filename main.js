@@ -19,6 +19,41 @@ process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true';
 // Silence noisy fontconfig/va warnings that leak into the terminal on some distros.
 process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true';
 
+// Where the remote-dlopen injector might live. It ships next to the hook .so,
+// so the first candidates mirror HOOK_CANDIDATES (dirname of the resolved
+// hook lib) — in the installed layout both sit in ~/.local/lib/nebula/hook/,
+// NOT next to main.js (which lives inside resources/app.asar).
+function findInjectHelper(hookLib) {
+  const candidates = [];
+  if (hookLib) candidates.push(path.join(path.dirname(hookLib), 'nebula-inject'));
+  candidates.push(
+    path.join(__dirname, 'hook', 'nebula-inject'),
+    path.join(__dirname, 'nebula-inject'),
+    path.join(NEBULA_ROOT, 'lib', 'nebula-inject'),
+    path.join(os.homedir(), '.local', 'lib', 'nebula', 'nebula-inject'),
+    path.join(os.homedir(), '.local', 'lib', 'nebula', 'hook', 'nebula-inject'),
+    path.join(os.homedir(), '.bin', 'nebula-inject'),
+    path.join(os.homedir(), '.local', 'bin', 'nebula-inject'),
+    '/usr/lib/nebula/nebula-inject',
+    '/usr/local/lib/nebula/nebula-inject',
+    path.join(__dirname, 'target', 'release', 'nebula-inject'),
+  );
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {}
+  }
+  // Last resort: is it on PATH?
+  for (const dir of (process.env.PATH || '').split(':')) {
+    if (!dir) continue;
+    const c = path.join(dir, 'nebula-inject');
+    try {
+      if (fs.existsSync(c)) return c;
+    } catch {}
+  }
+  return null;
+}
+
 // Where the hook library might live, in priority order.
 // The copy bundled with the app comes FIRST — it always matches this exact
 // release. System/user install locations are fallbacks (they may be stale).
@@ -600,14 +635,13 @@ ipcMain.handle('nebula:launchAndInject', async () => {
           lastInject = Date.now();
           sendProgress('waiting', 'No new process to preload — injecting into the running Sober…');
           try {
-            let inj = path.join(__dirname, 'hook', 'nebula-inject');
-            if (!fs.existsSync(inj)) inj = path.join(__dirname, 'nebula-inject');
-            if (fs.existsSync(inj)) {
+            const inj = findInjectHelper(hookLib);
+            if (inj) {
               const res = await run(`"${inj}" /tmp/libnebula_hook.so`, 30000);
               (res.stdout || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', l));
               (res.stderr || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', l));
             } else {
-              sendProgress('log', 'nebula-inject helper not found — skipping remote injection');
+              sendProgress('log', 'nebula-inject helper not found — reinstall Nebula or run: cargo build --release');
             }
           } catch (e) {
             sendProgress('log', `inject error: ${e}`);

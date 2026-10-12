@@ -146,57 +146,81 @@ unsafe fn find_sym(lib: *mut c_void, name: &str) -> Option<*mut c_void> {
 /// Load time: resolve the Luau API.
 ///
 /// Search order:
-///   1. `libSoberRuntime.so` if already mapped (NOLOAD),
-///   2. the global namespace (RTLD_DEFAULT) — covers any object that exports
-///      the Luau C API (Roblox loads several; we only need the symbols),
-///   3. every mapped shared object named in /proc/self/maps (some Luau hosts
-///      don't register their objects with the dynamic linker).
+///   1. `libSoberRuntime.so` / `libstanpreg` if already mapped (NOLOAD) —
+///      the classic Sober layout,
+///   2. the global namespace (RTLD_DEFAULT) — covers any object that already
+///      exports the Luau C API,
+///   3. a static scan of the mapped objects for one whose ELF actually
+///      exports `lua_pcall`, then NOLOAD-dlopen just that object.
 ///
-/// Only `lua_pcall` is mandatory — it anchors the hook. Everything else is
-/// required for full script execution; if missing we degrade gracefully.
+/// (3) exists because Sober renames/relocates its runtime library between
+/// builds; matching a hardcoded soname is what used to leave the hook
+/// loading happily but never capturing a VM. The scan only *reads* ELF
+/// headers — unlike probing objects with dlopen, it cannot deadlock the
+/// host's loader while it is still starting up.
 unsafe fn resolve_api() -> Option<Api> {
-    // Gate: only bother probing once a Luau host library is actually mapped.
-    // In non-game processes (launcher, services, helpers) this returns None
-    // quickly and keeps the ctor inert — running dlopen probes during early
-    // process startup (we're preloaded via ld.so.preload) can hit recursive
-    // loader locks and crash the host process.
     let maps = read_self_maps();
-    if !maps
+
+    // 1: the known host sonames, by name and then by mapped path.
+    let named: Vec<&String> = maps
         .iter()
-        .any(|n| n.contains("libSoberRuntime") || n.contains("libstanpreg"))
-    {
-        return None;
-    }
-
-    // 1: NOLOAD dlopen by soname.
-    let handle = dlopen(c"libSoberRuntime.so".as_ptr(), RTLD_LAZY | RTLD_NOLOAD);
-    if !handle.is_null() {
-        if let Some(api) = resolve_from(handle) {
-            return Some(api);
+        .filter(|n| n.contains("libSoberRuntime") || n.contains("libstanpreg"))
+        .collect();
+    if !named.is_empty() {
+        let handle = dlopen(c"libSoberRuntime.so".as_ptr(), RTLD_LAZY | RTLD_NOLOAD);
+        if !handle.is_null() {
+            if let Some(api) = resolve_from(handle) {
+                return Some(api);
+            }
+        }
+        for name in named {
+            let Ok(cname) = CString::new(name.as_str()) else { continue };
+            let h = dlopen(cname.as_ptr(), RTLD_LAZY | RTLD_NOLOAD);
+            if h.is_null() {
+                continue;
+            }
+            if let Some(api) = resolve_from(h) {
+                return Some(api);
+            }
         }
     }
 
-    // 2: dlopen ONLY the mapped Luau host libraries by their exact path —
-    // never walk-and-probe every mapped object. Probing unrelated binaries
-    // (translated Roblox blobs, APK natives) with dlopen has crash potential
-    // in the game process; the VM host is a known, safe target.
-    for name in maps {
-        if !(name.contains("libSoberRuntime") || name.contains("libstanpreg")) {
-            continue;
-        }
-        let cname = match CString::new(name.as_str()) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let h = dlopen(cname.as_ptr(), RTLD_LAZY | RTLD_NOLOAD);
-        if h.is_null() {
-            continue;
-        }
-        if let Some(api) = resolve_from(h) {
-            return Some(api);
+    // 2: whatever the host already exposes globally.
+    if let Some(api) = resolve_from(RTLD_DEFAULT) {
+        return Some(api);
+    }
+
+    // 3: name-independent — find the mapped object that exports lua_pcall.
+    // Throttled: this walks every mapped ELF, so don't do it 5x a second
+    // while waiting for the VM to appear.
+    static LAST_SCAN: AtomicUsize = AtomicUsize::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as usize)
+        .unwrap_or(0);
+    let last = LAST_SCAN.load(Ordering::Relaxed);
+    if now.saturating_sub(last) > 3000 && LAST_SCAN.swap(now, Ordering::Relaxed) == last {
+        for name in maps {
+            if elf_exports(&name, b"lua_pcall") {
+                let Ok(cname) = CString::new(name.as_str()) else { continue };
+                let h = dlopen(cname.as_ptr(), RTLD_LAZY | RTLD_NOLOAD);
+                if h.is_null() {
+                    continue;
+                }
+                if let Some(api) = resolve_from(h) {
+                    hook_log(&format!("captured Luau host library: {name}"));
+                    return Some(api);
+                }
+            }
         }
     }
     None
+}
+
+/// Does the ELF at `path` export `symbol`? Header-only read (no dlopen, no
+/// loader locks) — safe during host startup.
+fn elf_exports(path: &str, symbol: &[u8]) -> bool {
+    crate::remote::elf_file_exports(path, symbol)
 }
 
 /// Parse `/proc/self/maps` into a deduped list of mapped library paths.
@@ -833,6 +857,15 @@ extern "C" fn nebula_hook_init() {
 #[link_section = ".init_array"]
 #[used]
 static NEBULA_INIT: unsafe extern "C" fn() = nebula_hook_init;
+
+/// Write a line to the shared hook log (both the $HOME queue and the
+/// /tmp mirror the GUI harvests).
+fn hook_log(line: &str) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let paths = nebula_core::NebulaPaths::root(PathBuf::from(home).join(".nebula"));
+    let _ = paths.ensure();
+    ScriptQueue::new(&paths).hook_log(line);
+}
 
 /// Wait for the runtime .so, install the trampoline, then run the queue loop.
 fn init_and_install() {
