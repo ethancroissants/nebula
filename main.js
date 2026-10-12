@@ -183,7 +183,8 @@ function seedHookIntoProcRoot(pid, hookLib) {
     fs.chmodSync(target, 0o755);
     fs.writeFileSync(path.join(etc, 'ld.so.preload'), `${target}\n`);
     return true;
-  } catch {
+  } catch (e) {
+    sendProgress('log', `Could not seed pid ${pid}: ${e.code || e}`);
     return false;
   }
 }
@@ -219,15 +220,25 @@ async function applyOverride(hookLib) {
   // flatpak runtime, which is user-writable on user installs), and it applies
   // to EVERY process launched in the sandbox regardless of environment.
   let preloadRes = { ok: true };
+  const seedNotes = [];
   try {
     const rtDirs = runtimeEtcDirs();
+    let seeded = false;
     for (const etc of rtDirs) {
       try {
         fs.mkdirSync(etc, { recursive: true });
         fs.writeFileSync(path.join(etc, 'ld.so.preload'), `${hookLib}\n`);
+        seedNotes.push(`runtime preload OK: ${etc}`);
+        seeded = true;
         break; // first writable runtime wins
-      } catch {}
+      } catch (e) {
+        seedNotes.push(`runtime not writable: ${etc} (${e.code || e})`);
+      }
     }
+    if (!seeded) {
+      seedNotes.push('could not write ld.so.preload into any flatpak runtime (system install needs root)');
+    }
+    for (const note of seedNotes) log(note, seeded ? 'ok' : 'warn');
   } catch {}
   void preloadRes;
 
@@ -433,8 +444,10 @@ ipcMain.handle('nebula:launchAndInject', async () => {
       // next to it so the preload path always resolves inside that root.
       for (const proc of procs) {
         if (seededRoots.has(proc.pid)) continue;
-        if (seedHookIntoProcRoot(proc.pid, hookLib)) {
+        const ok = seedHookIntoProcRoot(proc.pid, hookLib);
+        if (ok) {
           seededRoots.add(proc.pid);
+          sendProgress('log', `Seeded hook into pid ${proc.pid}'s filesystem root`);
         }
       }
 
