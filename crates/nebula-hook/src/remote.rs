@@ -647,6 +647,46 @@ pub fn inject_sober(lib_path: &str) -> Option<i32> {
 mod tests {
     use super::*;
 
+    /// Regression test for the hardcoded-flatpak-commit-hash bug.
+    ///
+    /// The old implementation built a path containing one specific commit hash
+    /// (`.../stable/7b6430c703.../files/bin/sober`). Any Sober update changes
+    /// that hash, so every lookup missed and injection reported
+    /// "could not locate Sober binary". This test lays down a flatpak tree
+    /// with a *deliberately different* commit hash and asserts we still find it.
+    #[test]
+    fn find_sober_binary_does_not_depend_on_a_hardcoded_commit_hash() {
+        let tmp = std::env::temp_dir().join("nebula_flatpak_discovery_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // A commit hash that is definitely NOT the one the old code hardcoded.
+        let commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let bin = tmp
+            .join(".local/share/flatpak/app/org.vinegarhq.Sober/x86_64/stable")
+            .join(commit)
+            .join("files/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let sober = bin.join("sober");
+        std::fs::write(&sober, b"not-really-an-elf").unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        // SAFETY: single-threaded test harness section; restored immediately.
+        unsafe { std::env::set_var("HOME", &tmp) };
+        let found = find_sober_binary(-1);
+        match &old_home {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        let found = found.expect("should locate Sober under an unknown commit hash");
+        assert_eq!(
+            std::fs::canonicalize(&found).unwrap(),
+            std::fs::canonicalize(&sober).unwrap()
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn elf_lookup_finds_dlopen_in_host_libc() {
         let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
@@ -727,53 +767,216 @@ mod tests {
         // not portable, so assert the parsing contract instead.
         assert!(libc_candidates(maps).is_empty());
     }
-}
 
-/// Patch Sober's anti-tamper sequences in the running binary.
-///
-/// Attempts to NOP out 3 sequences known to block injection:
-///   1. secure_getenv at VA 0x73dc8b
-///   2. mov rdi check at position 26 (relative to .text start)
-///   3. call call sites at VA 0x736900/0x736908
-///
-/// Returns true if patching was attempted (success not guaranteed due to
-/// memory protections; the patch is applied to the file on disk and/or via
-/// ptrace to the tracee's text segment).
-/// Try to locate the Sober binary for patching purposes.
-/// 
-/// Tries the standard /proc/pid/exe path first, then falls back to a few
-/// known locations (flatpak runtime, /app/bin/sober) so that injection can
-/// proceed even when the process is running in a sandbox or namespace where
-/// /proc/pid/exe doesn't resolve to a on-disk file that the injector can read.
-fn find_sober_binary(pid: i32) -> std::io::Result<std::path::PathBuf> {
-    // 1) Flatpak runtime path — try multiple common layouts.
-    // We check both the full-hash path and the "current" symlink path.
-    if let Ok(home) = std::env::var("HOME") {
-        // a) Full-hash stable path (original)
-        let full_hash = format!(
-            "{}/.local/share/flatpak/app/org.vinegarhq.Sober/x86_64/stable/7b6430c703e8178baa536062099fc5a1e0c7cf213c0789695fa7660b62cb9d26/files/bin/sober",
-            home
-        );
-        if let Ok(path) = std::path::PathBuf::from(&full_hash).canonicalize() {
-            if path.exists() && path.is_file() {
-                eprintln!("[nebula-inject] found Sober binary at flatpak runtime path (full hash)");
-                return Ok(path);
-            }
+    /// Build a minimal ELF64-LE image with the given PT_LOAD segments.
+    /// Each entry is (flags, offset, vaddr, filesz, memsz).
+    fn synth_elf(segs: &[(u32, u64, u64, u64, u64)], body: &[u8]) -> Vec<u8> {
+        let mut d = vec![0u8; 64];
+        d[0..4].copy_from_slice(b"\x7fELF");
+        d[4] = 2; // ELFCLASS64
+        d[5] = 1; // ELFDATA2LSB
+        d[0x20..0x28].copy_from_slice(&(64u64).to_le_bytes()); // e_phoff
+        d[0x36..0x38].copy_from_slice(&(56u16).to_le_bytes()); // e_phentsize
+        d[0x38..0x3a].copy_from_slice(&(segs.len() as u16).to_le_bytes());
+
+        let mut ph = Vec::new();
+        for &(flags, offset, vaddr, filesz, memsz) in segs {
+            let mut e = vec![0u8; 56];
+            e[0..4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+            e[4..8].copy_from_slice(&flags.to_le_bytes());
+            e[8..16].copy_from_slice(&offset.to_le_bytes());
+            e[16..24].copy_from_slice(&vaddr.to_le_bytes());
+            e[24..32].copy_from_slice(&vaddr.to_le_bytes());
+            e[32..40].copy_from_slice(&filesz.to_le_bytes());
+            e[40..48].copy_from_slice(&memsz.to_le_bytes());
+            ph.extend_from_slice(&e);
         }
-        // b) "current" symlink path
-        let current = format!(
-            "{}/.local/share/flatpak/app/org.vinegarhq.Sober/x86_64/stable/current/files/bin/sober",
-            home
-        );
-        if let Ok(path) = std::path::PathBuf::from(&current).canonicalize() {
-            if path.exists() && path.is_file() {
-                eprintln!("[nebula-inject] found Sober binary at flatpak runtime path (current symlink)");
-                return Ok(path);
-            }
-        }
+        d.extend_from_slice(&ph);
+
+        let body_at = segs
+            .iter()
+            .filter(|s| s.2 == 0x3000)
+            .map(|s| s.1 as usize)
+            .next()
+            .unwrap_or(0);
+        d.resize(body_at.max(d.len()), 0);
+        d.extend_from_slice(body);
+        d
     }
 
-    // 2) /proc/pid/exe — the process's own executable.
+    #[test]
+    fn parse_load_segments_rejects_non_elf() {
+        assert!(parse_load_segments(b"not an elf at all, really not").is_none());
+        assert!(parse_load_segments(&[0u8; 128]).is_none());
+    }
+
+    /// The core regression: a VA must map through the real program headers.
+    /// This segment has `vaddr - offset == 0x2000`, exactly the layout that
+    /// made the old `va - 0x1000` arithmetic write to the wrong bytes.
+    #[test]
+    fn classify_va_honours_the_real_program_headers() {
+        // (flags=R E, offset=0x1000, vaddr=0x3000, filesz=0x100, memsz=0x100)
+        let elf = synth_elf(&[(5, 0x1000, 0x3000, 0x100, 0x100)], &[0u8; 0x100]);
+        let segs = parse_load_segments(&elf).unwrap();
+        assert_eq!(classify_va(&segs, 0x3050), Ok(0x1050));
+        // Not `0x2050` — the old assumption.
+        assert_ne!(classify_va(&segs, 0x3050), Ok(0x2050));
+    }
+
+    #[test]
+    fn classify_va_rejects_bss_and_data() {
+        // R E segment whose memsz exceeds filesz -> tail is .bss, no file bytes.
+        let elf = synth_elf(&[(5, 0x1000, 0x3000, 0x100, 0x400)], &[0u8; 0x100]);
+        let segs = parse_load_segments(&elf).unwrap();
+        assert!(matches!(
+            classify_va(&segs, 0x3200),
+            Err(Unpatchable::NoFileBacking)
+        ));
+        // File-backed but RW: data, not code.
+        assert!(matches!(
+            classify_va(&segs, 0x3050),
+            Ok(0x1050) | Err(_)
+        ));
+        let data_elf = synth_elf(&[(6, 0x1000, 0x3000, 0x100, 0x100)], &[0u8; 0x100]);
+        let data_segs = parse_load_segments(&data_elf).unwrap();
+        assert!(matches!(
+            classify_va(&data_segs, 0x3050),
+            Err(Unpatchable::NotExecutable)
+        ));
+        assert!(matches!(
+            classify_va(&data_segs, 0x9999),
+            Err(Unpatchable::Unmapped)
+        ));
+    }
+
+    /// End-to-end guard: when no configured site resolves to code, the binary
+    /// on disk must come out byte-identical. This is the property that stops
+    /// the old corruption bug (writing 0x90 into an unrelated string literal).
+    #[test]
+    fn patch_refuses_and_leaves_file_untouched_when_no_site_is_code() {
+        let tmp = std::env::temp_dir().join("nebula_patch_refusal_test.bin");
+        // Only a RW segment: every configured site is data or unmapped.
+        let original = synth_elf(&[(6, 0x1000, 0x70000, 0x400, 0x400)], &[0xa5u8; 0x400]);
+        std::fs::write(&tmp, &original).unwrap();
+
+        let patched = patch_sober_binary_at(&tmp);
+
+        let after = std::fs::read(&tmp).unwrap();
+        assert!(
+            !patched,
+            "should refuse when no site resolves to executable code"
+        );
+        assert_eq!(
+            original, after,
+            "binary must be byte-identical after a refusal"
+        );
+        // No backup should have been left behind either.
+        let backup = tmp.with_extension("bin.nebula-backup");
+        assert!(!backup.exists(), "refusal must not create a backup file");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Flatpak installation roots, user-level first then system-wide.
+/// A path entry pointing at a missing directory is harmless; the caller skips it.
+fn flatpak_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(std::path::PathBuf::from(home).join(".local/share/flatpak"));
+    }
+    roots.push(std::path::PathBuf::from("/var/lib/flatpak"));
+    roots.push(std::path::PathBuf::from("/usr/share/flatpak"));
+    roots
+}
+
+/// Return the first candidate that is an existing regular file.
+///
+/// `canonicalize` is deliberately *not* required to succeed: inside a
+/// flatpak sandbox the host path may be a symlink that does not resolve from
+/// the current namespace, but the file is still the right one to patch.
+fn first_regular_file(candidates: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    candidates
+        .iter()
+        .find(|p| p.is_file())
+        .cloned()
+}
+
+/// Locate the Sober binary without needing a running process.
+///
+/// Works purely from the filesystem, so it is usable *before* Sober launches —
+/// which is the only time an on-disk patch can have any effect. Returns the
+/// flatpak install path if one exists.
+pub fn locate_sober_binary() -> Option<std::path::PathBuf> {
+    // Flatpak runtime path.
+    // These are deliberately version-INDEPENDENT: we must never hardcode a
+    // flatpak commit hash, because that hash changes on every Sober update
+    // and a stale one silently makes every lookup miss.
+    //   current/active -> the installed commit, whatever it happens to be.
+    //   <branch>/*     -> scan, as a fallback if `active` is missing.
+    for root in flatpak_roots() {
+        let app = root.join("app/org.vinegarhq.Sober");
+        if !app.is_dir() {
+            continue;
+        }
+
+        // a) current/active — resolves through the `current` symlink chain
+        //    (app/current -> x86_64/stable, current/active -> <commit>).
+        let active = app.join("current/active/files/bin/sober");
+        if let Some(found) = first_regular_file(&[active]) {
+            eprintln!(
+                "[nebula-inject] found Sober binary at flatpak current/active: {}",
+                found.display()
+            );
+            return Some(found);
+        }
+
+        // b) Scan every installed commit under each architecture/branch dir.
+        //    Picks the newest commit by mtime so we patch what actually runs.
+        let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+        for arch in ["x86_64", "aarch64"] {
+            for branch in ["stable", "beta", "latest"] {
+                let dir = app.join(arch).join(branch);
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let bin = entry.path().join("files/bin/sober");
+                    if !bin.is_file() {
+                        continue;
+                    }
+                    let mtime = entry
+                        .path()
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH);
+                    if best.as_ref().is_none_or(|(best_t, _)| mtime > *best_t) {
+                        best = Some((mtime, bin));
+                    }
+                }
+            }
+        }
+        if let Some((_, bin)) = best {
+            eprintln!(
+                "[nebula-inject] found Sober binary by scanning flatpak commits: {}",
+                bin.display()
+            );
+            return Some(bin);
+        }
+    }
+    None
+}
+
+/// Locate the Sober binary for a *running* process.
+///
+/// Tries the filesystem-only locator first (it is the more reliable source in
+/// flatpak/sandbox setups), then falls back to process-relative paths.
+fn find_sober_binary(pid: i32) -> std::io::Result<std::path::PathBuf> {
+    if let Some(found) = locate_sober_binary() {
+        return Ok(found);
+    }
+
+    // /proc/pid/exe — the process's own executable.
     // Only use if it resolves to an on-disk regular file that actually exists.
     if let Ok(candidate) = std::fs::read_link(format!("/proc/{pid}/exe")) {
         if candidate.exists() && candidate.is_file() {
@@ -781,13 +984,13 @@ fn find_sober_binary(pid: i32) -> std::io::Result<std::path::PathBuf> {
         }
     }
 
-    // 3) /app/bin/sober — fallback for container/installed setups
+    // /app/bin/sober — fallback for container/installed setups
     let fallback = std::path::PathBuf::from("/app/bin/sober");
     if fallback.exists() && fallback.is_file() {
         return Ok(fallback);
     }
 
-    // 4) /tmp as last resort — may contain a previously patched copy
+    // /tmp as last resort — may contain a previously patched copy
     let tmp = std::path::PathBuf::from(format!("/tmp/sober_{}.bin", pid));
     if tmp.exists() && tmp.is_file() {
         return Ok(tmp);
@@ -798,9 +1001,254 @@ fn find_sober_binary(pid: i32) -> std::io::Result<std::path::PathBuf> {
         format!("could not find Sober binary for pid {pid}",
     ))
 )}
+/// A PT_LOAD segment from the ELF program headers.
+struct LoadSegment {
+    offset: u64,
+    vaddr: u64,
+    filesz: u64,
+    memsz: u64,
+    executable: bool,
+}
+
+/// Parse the PT_LOAD program headers of an ELF64 little-endian image.
+///
+/// Returns `None` for anything that is not ELF64-LE, so callers can refuse to
+/// patch rather than scribbling at guessed offsets.
+fn parse_load_segments(data: &[u8]) -> Option<Vec<LoadSegment>> {
+    if data.len() < 64 || &data[0..4] != b"\x7fELF" || data[4] != 2 || data[5] != 1 {
+        return None;
+    }
+    let u16_at = |o: usize| -> Option<u16> {
+        Some(u16::from_le_bytes([*data.get(o)?, *data.get(o.checked_add(1)?)?]))
+    };
+    let u32_at = |o: usize| -> Option<u32> {
+        Some(u32::from_le_bytes([
+            *data.get(o)?,
+            *data.get(o.checked_add(1)?)?,
+            *data.get(o.checked_add(2)?)?,
+            *data.get(o.checked_add(3)?)?,
+        ]))
+    };
+    let u64_at = |o: usize| -> Option<u64> {
+        let mut b = [0u8; 8];
+        for (i, slot) in b.iter_mut().enumerate() {
+            *slot = *data.get(o.checked_add(i)?)?;
+        }
+        Some(u64::from_le_bytes(b))
+    };
+
+    const PT_LOAD: u32 = 1;
+    const PF_X: u32 = 1;
+
+    let phoff = u64_at(0x20)? as usize;
+    let phentsize = u16_at(0x36)? as usize;
+    let phnum = u16_at(0x38)? as usize;
+    if phentsize < 56 {
+        return None;
+    }
+
+    let mut segs = Vec::new();
+    for i in 0..phnum {
+        let o = phoff.checked_add(i.checked_mul(phentsize)?)?;
+        if u32_at(o)? != PT_LOAD {
+            continue;
+        }
+        segs.push(LoadSegment {
+            executable: u32_at(o + 4)? & PF_X != 0,
+            offset: u64_at(o + 8)?,
+            vaddr: u64_at(o + 16)?,
+            filesz: u64_at(o + 32)?,
+            memsz: u64_at(o + 40)?,
+        });
+    }
+    if segs.is_empty() {
+        None
+    } else {
+        Some(segs)
+    }
+}
+
+/// Why a VA cannot be patched. Used to explain refusals instead of silently
+/// writing to a guessed offset.
+#[derive(Debug, PartialEq, Eq)]
+enum Unpatchable {
+    /// VA is not covered by any PT_LOAD at all.
+    Unmapped,
+    /// VA is inside a segment's memory range but past its file size (.bss),
+    /// so the image has no bytes there to modify.
+    NoFileBacking,
+    /// VA is file-backed but in a non-executable segment: a pointer table,
+    /// a string literal, or other data. Patching it corrupts the binary.
+    NotExecutable,
+}
+
+fn classify_va(segs: &[LoadSegment], va: u64) -> Result<usize, Unpatchable> {
+    let mut in_memory = false;
+    for s in segs {
+        if va < s.vaddr || va >= s.vaddr.saturating_add(s.memsz) {
+            continue;
+        }
+        in_memory = true;
+        // Must be file-backed AND executable before we will touch a byte.
+        if va >= s.vaddr.saturating_add(s.filesz) {
+            continue; // .bss — no file bytes here
+        }
+        if !s.executable {
+            return Err(Unpatchable::NotExecutable);
+        }
+        let off = s.offset + (va - s.vaddr);
+        return Ok(off as usize);
+    }
+    if in_memory {
+        Err(Unpatchable::NoFileBacking)
+    } else {
+        Err(Unpatchable::Unmapped)
+    }
+}
+
+/// A candidate patch site.
+///
+/// These VAs came from earlier analysis of a Sober build and are kept so the
+/// tool can report on them explicitly. Analysis showed they are **not**
+/// instructions:
+///
+/// * `0x73dc8b` lies past its segment's `filesz` — it is `.bss`, with no bytes
+///   in the image at all.
+/// * `0x736900` / `0x736908` are 8-byte relocated pointers in `.data.rel.ro`
+///   whose targets disassemble to PLT trampolines, not a security check.
+///
+/// `classify_va` therefore rejects all three, which is the correct outcome:
+/// there is nothing here to NOP. They must not be "patched" blindly — the old
+/// implementation wrote `0x90` at `va - 0x1000`, which is the wrong offset for
+/// this layout (`vaddr - offset` is `0x2000` for the data segment) and landed
+/// inside an unrelated string literal.
+struct PatchSite {
+    va: u64,
+    len: usize,
+}
+
+const PATCH_SITES: &[PatchSite] = &[
+    PatchSite { va: 0x73dc8b, len: 3 },
+    PatchSite { va: 0x736900, len: 8 },
+    PatchSite { va: 0x736908, len: 8 },
+];
+
+/// Patch the Sober binary at an explicit path.
+///
+/// Safe by construction: only bytes that resolve to file-backed *executable*
+/// ranges are ever written, a backup is taken first, and any write failure is
+/// reported rather than swallowed. Returns true only if the binary on disk is
+/// (now) in the intended state.
+pub fn patch_sober_binary_at(exe_path: &std::path::Path) -> bool {
+    let mut data = match std::fs::read(exe_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!(
+                "[nebula-inject] could not read Sober binary at {}: {e}",
+                exe_path.display()
+            );
+            return false;
+        }
+    };
+
+    let Some(segs) = parse_load_segments(&data) else {
+        eprintln!(
+            "[nebula-inject] {} is not a parseable ELF64 image — refusing to patch",
+            exe_path.display()
+        );
+        return false;
+    };
+
+    let mut changed = false;
+    let mut patchable = 0usize;
+
+    for site in PATCH_SITES {
+        match classify_va(&segs, site.va) {
+            Ok(off) => {
+                let Some(end) = off.checked_add(site.len) else {
+                    continue;
+                };
+                if end > data.len() {
+                    eprintln!(
+                        "[nebula-inject] VA={:#x} maps past end of image — skipped",
+                        site.va
+                    );
+                    continue;
+                }
+                patchable += 1;
+                if data[off..end].iter().all(|&b| b == 0x90) {
+                    eprintln!(
+                        "[nebula-inject] VA={:#x} already NOPed at file_off={off:#x}",
+                        site.va
+                    );
+                    continue;
+                }
+                data[off..end].fill(0x90);
+                changed = true;
+                eprintln!(
+                    "[nebula-inject] NOPed {} byte(s) at VA={:#x} file_off={off:#x}",
+                    site.len,
+                    site.va
+                );
+            }
+            Err(why) => {
+                let why = match why {
+                    Unpatchable::Unmapped => "not mapped by any PT_LOAD segment",
+                    Unpatchable::NoFileBacking => {
+                        "inside a segment but past its file size (.bss) — no bytes in the image"
+                    }
+                    Unpatchable::NotExecutable => {
+                        "file-backed but in a non-executable segment (data, not code)"
+                    }
+                };
+                eprintln!(
+                    "[nebula-inject] VA={:#x} is NOT patchable: {why} — left untouched",
+                    site.va
+                );
+            }
+        }
+    }
+
+    if patchable == 0 {
+        eprintln!(
+            "[nebula-inject] none of the {} configured patch sites resolve to code in this \
+             build — binary left unmodified",
+            PATCH_SITES.len()
+        );
+        return false;
+    }
+
+    if !changed {
+        eprintln!("[nebula-inject] Sober binary already patched — no write needed");
+        return true;
+    }
+
+    // Back up before touching anything, so a bad write is recoverable.
+    let backup = exe_path.with_extension("bin.nebula-backup");
+    if let Err(e) = std::fs::copy(exe_path, &backup) {
+        eprintln!(
+            "[nebula-inject] could not back up {} to {}: {e} — refusing to patch",
+            exe_path.display(),
+            backup.display()
+        );
+        return false;
+    }
+    eprintln!("[nebula-inject] backup saved to {}", backup.display());
+
+    if let Err(e) = std::fs::write(exe_path, &data) {
+        eprintln!(
+            "[nebula-inject] FAILED to write patched binary to {}: {e}",
+            exe_path.display()
+        );
+        eprintln!("[nebula-inject] original preserved at {}", backup.display());
+        return false;
+    }
+    eprintln!("[nebula-inject] wrote patched binary to {}", exe_path.display());
+    true
+}
+
+/// Locate the Sober binary for `pid` and patch it.
 fn patch_sober_binary(pid: i32) -> bool {
-    // Attempt to locate the Sober binary, trying /proc/pid/exe first and
-    // falling back to known paths if the process exe cannot be read or read.
     let exe_path = match find_sober_binary(pid) {
         Ok(p) => p,
         Err(_) => {
@@ -808,118 +1256,16 @@ fn patch_sober_binary(pid: i32) -> bool {
             return false;
         }
     };
-
-    // Read the binary from disk
-    let Ok(mut data) = std::fs::read(&exe_path) else {
-        eprintln!("[nebula-inject] could not read Sober binary at {}", exe_path.display());
-        return false;
-    };
-
-    // Check if already patched: verify first byte at each expected location is 0x90
-    // We'll attempt to patch by writing 0x90 at file offsets calculated from VA.
-    // Based on ELF analysis: second LOAD segment has file_offset = virt_addr - 0x1000.
-    let va_patches: [u64; 3] = [0x73dc8b, 0x736900, 0x736908];
-    let mut already_patched = true;
-
-    for &va in &va_patches {
-        // Calculate file offset: for the second LOAD segment, file_off = va - 0x1000
-        // But only if VA is in the mapped range. As a heuristic, try multiple segments.
-        let mut file_off: usize = 0;
-        let mut patchable = false;
-
-        // Try: file_offset = va - 0x1000 (second LOAD segment)
-        let hypothesized = (va as isize - 0x1000 as isize) as usize;
-        if hypothesized < data.len() && data[hypothesized] == 0x90 {
-            file_off = hypothesized;
-            patchable = true;
-        } else {
-            // Try: file_offset = va (first LOAD segment, if VA < 0x1e4880)
-            if va < 0x1e4880 && data[va as usize] == 0x90 {
-                file_off = va as usize;
-                patchable = true;
-            }
-            // Try: just search for 0x90 near the beginning of the .text segment
-            for start in [0x001e4880usize, 0x0071ae50usize, 0x00734de0usize] {
-                if start < data.len() && data[start] == 0x90 {
-                    file_off = start;
-                    patchable = true;
-                    break;
-                }
-            }
-        }
-
-        if !patchable {
-            already_patched = false;
-            eprintln!("[nebula-inject] patch location VA={:#x} not found or already OK", va);
-        } else {
-            eprintln!("[nebula-inject] patch location VA={:#x} file_off={:#x} already has 0x90", va, file_off);
-        }
-    }
-
-    if already_patched {
-        eprintln!("[nebula-inject] Sober binary already patched — skipping");
-        return true;
-    }
-
-    // Apply patches: write 0x90 (NOP) at each file offset
-    for &va in &va_patches {
-        // Try multiple file offset calculations
-        let mut tried: usize = 0;
-        let mut success = false;
-
-        // Attempt 1: file_off = va - 0x1000
-        let off1 = (va as isize - 0x1000 as isize) as usize;
-        if off1 < data.len() {
-            data[off1] = 0x90;
-            tried = off1;
-            success = true;
-        }
-
-        // Attempt 2: file_off = va (if VA < segment start)
-        if !success && (va as usize) < data.len() {
-            data[va as usize] = 0x90;
-            tried = va as usize;
-            success = true;
-        }
-
-        // Attempt 3: file_off = va - 0x2000 (alternative segment)
-        if !success {
-            let off3 = (va as isize - 0x2000 as isize) as usize;
-            if off3 < data.len() {
-                data[off3] = 0x90;
-                tried = off3;
-                success = true;
-            }
-        }
-
-        if success {
-            eprintln!("[nebula-inject] applied NOP patch at VA={:#x} file_off={:#x}", va, tried);
-        } else {
-            eprintln!("[nebula-inject] could not determine file offset for VA={:#x}, tried positions", va);
-        }
-    }
-
-    // Write patched binary back to disk
-    if let Some(parent) = exe_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-        let _ = std::fs::write(&exe_path, &data);
-        eprintln!("[nebula-inject] wrote patched binary to {}", exe_path.display());
-    } else {
-        // If no parent (unlikely), try /tmp
-        let fallback = format!("/tmp/sober_patched_{}.bin", pid);
-        let _ = std::fs::write(&fallback, &data);
-        eprintln!("[nebula-inject] wrote patched binary to {fallback} (original path not writable)");
-    }
-
-    true
+    eprintln!("[nebula-inject] patching {}", exe_path.display());
+    patch_sober_binary_at(&exe_path)
 }
 
 /// Collect the Sober process's binary path and attempt auto-patching.
+///
+/// Note this runs against an *already-running* Sober, so an on-disk patch
+/// cannot affect it: the process mapped its text before we got here. It is
+/// kept for reporting/diagnostics; the effective patch point is
+/// `patch_sober_binary_at` called from `spawn_mode` before launch.
 pub fn find_and_patch_sober(pid: i32) -> bool {
-    // First, try the standard patching procedure
-    let patched = patch_sober_binary(pid);
-    if patched {
-        eprintln!("[nebula-inject] Sober patching procedure completed");
-    }
-    patched
+    patch_sober_binary(pid)
 }

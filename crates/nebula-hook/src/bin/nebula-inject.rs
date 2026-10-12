@@ -33,6 +33,38 @@ fn spawn_mode(lib: &str, argv: &[String], attach_only: bool) -> ExitCode {
     let mut child = Command::new(prog);
     child.args(&argv[1..]);
     child.env_remove("LD_PRELOAD");
+
+    // Patch BEFORE the process exists.
+    //
+    // A running process has already mapped its text segment, so rewriting the
+    // binary on disk afterwards cannot change the code executing in its
+    // address space — patching after launch is a guaranteed no-op. Doing it
+    // here is the only point where an on-disk patch can take effect.
+    //
+    // Best-effort: a refusal here is reported and the spawn still proceeds,
+    // because the caller may be aiming at an arbitrary program rather than
+    // Sober, and failing to spawn would be worse than an unpatched launch.
+    match remote::locate_sober_binary() {
+        Some(bin) => {
+            eprintln!(
+                "[nebula-inject] pre-launch: patching {}",
+                bin.display()
+            );
+            if !remote::patch_sober_binary_at(&bin) {
+                eprintln!(
+                    "[nebula-inject] pre-launch: no patch applied (see reasons above) — \
+                     continuing unpatched"
+                );
+            }
+        }
+        None => {
+            eprintln!(
+                "[nebula-inject] pre-launch: no Sober binary found to patch — \
+                 continuing without patching"
+            );
+        }
+    }
+
     let Ok(mut child) = child.spawn() else {
         eprintln!("[nebula-inject] could not spawn {prog}");
         return ExitCode::from(1);
