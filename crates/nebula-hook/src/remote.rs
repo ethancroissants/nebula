@@ -132,6 +132,11 @@ fn stopsig(status: i32) -> i32 {
 /// (scope 1+) - callers get EPERM and decide whether to retry elevated.
 fn stop_all_threads(pid: i32) -> Result<Vec<i32>, String> {
     let tids = list_threads(pid);
+    // Threads we have actually attached to, so a later failure can resume
+    // them. Returning early while some threads are still stopped would freeze
+    // the host for good -- and a frozen Roblox process looks exactly like a
+    // crash to anything watching it.
+    let mut attached: Vec<i32> = Vec::new();
     for &tid in &tids {
         let rv =
             unsafe { libc_ptrace(PTRACE_ATTACH, tid, core::ptr::null_mut::<c_void>(), core::ptr::null_mut::<c_void>()) };
@@ -142,6 +147,7 @@ fn stop_all_threads(pid: i32) -> Result<Vec<i32>, String> {
             if tid != pid {
                 continue;
             }
+            detach_all(&attached);
             if e.raw_os_error() == Some(EPERM) {
                 // Deliberately NOT blaming Yama. Observed on real Sober:
                 // scope 0 still gets EPERM, and so does root. The refusal is
@@ -154,9 +160,26 @@ fn stop_all_threads(pid: i32) -> Result<Vec<i32>, String> {
             }
             return Err(format!("ATTACH main thread: {e}"));
         }
-        wait_stop(tid)?;
+        attached.push(tid);
+        if let Err(e) = wait_stop(tid) {
+            detach_all(&attached);
+            return Err(e);
+        }
     }
-    Ok(tids)
+    Ok(attached)
+}
+
+/// Attach to every thread of `pid`, then detach again without changing
+/// anything.
+///
+/// Used as a probe to separate two very different failures: a host that dies
+/// merely because it is being ptraced (anti-debug / TracerPid polling) versus
+/// one that dies from what we do once attached. The second is our bug and is
+/// fixable; the first means this whole injection approach cannot work.
+pub fn probe_attach(pid: i32) -> Result<(), String> {
+    let attached = stop_all_threads(pid)?;
+    detach_all(&attached);
+    Ok(())
 }
 
 /// Detach every thread (resumes the process).

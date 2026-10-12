@@ -25,7 +25,7 @@ use nebula_hook::remote;
 /// This exists because ptrace_scope=1 only permits tracing descendants — so a
 /// self-spawned target is the one case we can always attach to, which makes it
 /// the right harness for exercising the injection mechanics without Sober.
-fn spawn_mode(lib: &str, argv: &[String]) -> ExitCode {
+fn spawn_mode(lib: &str, argv: &[String], attach_only: bool) -> ExitCode {
     let Some(prog) = argv.first() else {
         eprintln!("usage: nebula-inject --spawn <lib> <program> [args...]");
         return ExitCode::from(2);
@@ -43,25 +43,36 @@ fn spawn_mode(lib: &str, argv: &[String]) -> ExitCode {
     // Give the target a moment to map libc and reach its main loop.
     std::thread::sleep(std::time::Duration::from_millis(1200));
 
-    let result = remote::inject_dlopen(pid, lib);
+    let result: Result<bool, String> = if attach_only {
+        remote::probe_attach(pid).map(|_| true)
+    } else {
+        remote::inject_dlopen(pid, lib)
+    };
 
-    // The hook's constructor spawns a thread that settles (1.5 s) before it
-    // writes its first heartbeat, so give it room before reaping the child.
+    // In probe mode nothing was loaded, so there is no heartbeat to wait for.
     let mut flag = String::new();
-    for _ in 0..40 {
-        flag = read_flag();
-        if flag != "(none)" {
-            break;
+    if !attach_only {
+        // The hook's constructor spawns a thread that settles (1.5 s) before
+        // it writes its first heartbeat, so give it room before reaping.
+        for _ in 0..40 {
+            flag = read_flag();
+            if flag != "(none)" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        println!("[nebula-inject] hook heartbeat after inject: {flag}");
     }
-    println!("[nebula-inject] hook heartbeat after inject: {flag}");
 
     // Leave the child in a known state and reap it.
     let _ = child.kill();
     let _ = child.wait();
 
     match result {
+        Ok(true) if attach_only => {
+            println!("[nebula-inject] probe OK on pid {pid} — ptrace alone is survivable");
+            ExitCode::SUCCESS
+        }
         Ok(true) => {
             println!("[nebula-inject] injected into pid {pid} — hook .so loaded");
             ExitCode::SUCCESS
@@ -94,10 +105,31 @@ fn read_flag() -> String {
     "(none)".into()
 }
 
+/// Attach to every thread and detach again, loading nothing.
+///
+/// Answers the question that matters when the host vanishes mid-injection:
+/// did merely *being traced* kill it, or did our dlopen trampoline? Those
+/// need completely different responses, and right now they look identical
+/// from the outside — both present as "Sober closed by itself".
+fn probe_into(pids: &[i32]) -> ExitCode {
+    for pid in pids {
+        println!("[nebula-inject] probing pid {pid} (attach + detach, nothing else)…");
+        match remote::probe_attach(*pid) {
+            Ok(()) => {
+                println!("[nebula-inject] probe OK on pid {pid} — ptrace alone is survivable");
+                return ExitCode::SUCCESS;
+            }
+            Err(e) => eprintln!("[nebula-inject] probe failed on pid {pid}: {e}"),
+        }
+    }
+    eprintln!("[nebula-inject] no pid accepted a plain attach/detach probe");
+    ExitCode::from(1)
+}
+
 /// Try each pid in turn; success on the first that accepts the hook.
 ///
 /// Returns the exit code plus a flag saying whether *every* attempt was
-/// refused with EPERM (i.e. Yama is the only thing in the way).
+/// refused with EPERM (i.e. the capability check is the only thing in the way).
 fn inject_into(pids: &[i32], lib: &str) -> (ExitCode, bool) {
     let mut saw_eperm = false;
     let mut saw_other = false;
@@ -283,10 +315,14 @@ fn main() -> ExitCode {
     // restore it, so never escalate from in here. Nebula's front-end is the
     // process that can actually show a password dialog; a sudo prompt fired
     // from this child would land on a terminal nobody is watching.
+    // NB: --attach-only is filtered out of the positional args too, so in
+    // `--spawn` mode it can appear after the program without being handed
+    // to that program as an argument.
     let argv: Vec<String> = env::args()
         .skip(1)
-        .filter(|a| a != "--yama-relaxed")
+        .filter(|a| a != "--yama-relaxed" && a != "--attach-only")
         .collect();
+    let attach_only = env::args().any(|a| a == "--attach-only");
     let yama_relaxed = env::args().any(|a| a == "--yama-relaxed");
     // Set when we re-exec'd ourselves inside the target's user namespace.
     // Guards against recursing: from in there we are already the right
@@ -300,7 +336,7 @@ fn main() -> ExitCode {
             eprintln!("usage: nebula-inject --spawn <lib> <program> [args...]");
             return ExitCode::from(2);
         }
-        return spawn_mode(&argv[1], &argv[2..]);
+        return spawn_mode(&argv[1], &argv[2..], attach_only);
     }
 
     let mut args = argv.into_iter();
@@ -331,6 +367,10 @@ fn main() -> ExitCode {
     if pids.is_empty() {
         eprintln!("[nebula-inject] no running sober process found");
         return ExitCode::from(1);
+    }
+
+    if attach_only {
+        return probe_into(&pids);
     }
     // First pass as-is. If every pid is refused with EPERM, relax Yama and
     // try again (see below).

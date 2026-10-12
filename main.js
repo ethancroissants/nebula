@@ -847,14 +847,37 @@ ipcMain.handle('nebula:launchAndInject', async () => {
           try {
             const inj = findInjectHelper(hookLib);
             if (inj) {
-              // Try with no privileges first. Joining the target's user
-              // namespace (which the injector does itself) is normally enough,
-              // and asking for admin rights on every single launch would be
-              // both noisy and unnecessary.
+              // PROBE FIRST: attach and detach without touching anything. If the host
+              // dies from merely being traced (anti-debug / TracerPid
+              // polling), we must know BEFORE we run the dlopen trampoline,
+              // because otherwise both cases present identically as
+              // "Sober closed by itself" and we learn nothing.
               const show = (r, label) => {
                 (r.stdout || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', `[${label}] ${l}`));
                 (r.stderr || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', `[${label}] ${l}`));
               };
+              let probe = await run(`"${inj}" /tmp/libnebula_hook.so --attach-only`, 20000);
+              if (!probe.ok && /EPERM/.test(probe.stderr || '')) {
+                sendProgress('preparing', 'probe needs admin rights — requesting…');
+                probe = await withYamaRelaxed(() =>
+                  run(`"${inj}" /tmp/libnebula_hook.so --attach-only --yama-relaxed`, 20000),
+                );
+              }
+              show(probe, 'probe');
+
+              // Did the host survive being traced?
+              await sleep(600);
+              const stillAlive = findSoberProcessesSync().length > 0;
+              if (!stillAlive) {
+                sendProgress(
+                  'error',
+                  'Sober exited as soon as it was ptraced — no code was injected. ' +
+                  'This host treats being traced as hostile, so remote injection cannot work here.',
+                );
+                return { ok: false, error: 'host terminates when ptraced (anti-debug)' };
+              }
+              sendProgress('log', 'probe survived — proceeding with injection');
+
               const plain = await run(`"${inj}" /tmp/libnebula_hook.so`, 30000);
               show(plain, 'inject');
               let res = plain;
