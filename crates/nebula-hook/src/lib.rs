@@ -153,6 +153,16 @@ unsafe fn find_sym(lib: *mut c_void, name: &str) -> Option<*mut c_void> {
 /// Only `lua_pcall` is mandatory — it anchors the hook. Everything else is
 /// required for full script execution; if missing we degrade gracefully.
 unsafe fn resolve_api() -> Option<Api> {
+    // Gate: only bother probing once a Luau host library is actually mapped.
+    // In non-game processes (launcher, services, helpers) this returns None
+    // quickly and keeps the ctor inert — running dlopen probes during early
+    // process startup (we're preloaded via ld.so.preload) can hit recursive
+    // loader locks and crash the host process.
+    let maps = read_self_maps();
+    let vm_candidate = maps
+        .iter()
+        .any(|n| n.contains("libSoberRuntime") || n.contains("libstanpreg"));
+
     // 1+2: NOLOAD dlopen, then global scope.
     let mut handle = dlopen(c"libSoberRuntime.so".as_ptr(), RTLD_LAZY | RTLD_NOLOAD);
     if handle.is_null() {
@@ -164,9 +174,13 @@ unsafe fn resolve_api() -> Option<Api> {
         }
     }
 
+    if !vm_candidate {
+        return None;
+    }
+
     // 3: walk /proc/self/maps and dlopen each mapped .so with NOLOAD, probing
-    // for lua_pcall. This catches statically-renamed objects.
-    let maps = read_self_maps();
+    // for lua_pcall. This catches statically-renamed objects. Only run once
+    // a VM library is mapped (see gate above).
     for name in maps {
         let cname = match CString::new(name.as_str()) {
             Ok(c) => c,
@@ -768,7 +782,14 @@ extern "C" fn nebula_hook_init() {
         let _ = std::thread::Builder::new()
             .name("nebula-init".into())
             .spawn(|| {
-                let _ = std::panic::catch_unwind(init_and_install);
+                let _ = std::panic::catch_unwind(|| {
+                    // Give the host's early startup (UPX stub re-exec, loader
+                    // self-relocation, GTK service init) time to settle
+                    // before we start touching the dynamic loader. We're
+                    // preloaded into EVERY process now, so stay quiet first.
+                    std::thread::sleep(Duration::from_millis(1500));
+                    init_and_install();
+                });
             });
     });
 }

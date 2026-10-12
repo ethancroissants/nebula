@@ -611,20 +611,25 @@ async function getHookStatus() {
 }
 
 // Tail the hook's own log file(s): ~/.nebula/queue/log plus the /tmp/.nebula
-// mirrors found inside every running Sober process root.
+// mirrors found inside every running Sober process root. The log can grow
+// fast inside the game — cap how much we relay per tick and keep a ring
+// buffer of recent lines so a flood can't wedge the renderer.
 let lastLogPos = 0;
 let rootLogMarks = new Map(); // path -> last size
+const MAX_LOG_LINES_PER_TICK = 40;
 setInterval(() => {
+  const relay = (text) => {
+    const lines = text.split('\n').filter((l) => l.trim());
+    for (const line of lines.slice(-MAX_LOG_LINES_PER_TICK)) {
+      sendProgress('hooklog', line);
+    }
+  };
   try {
     const data = fs.readFileSync(LOG_FILE, 'utf8');
     if (data.length >= lastLogPos) {
       const chunk = data.slice(lastLogPos);
       lastLogPos = data.length;
-      if (chunk.trim()) {
-        for (const line of chunk.split('\n')) {
-          if (line.trim()) sendProgress('hooklog', line);
-        }
-      }
+      if (chunk.trim()) relay(chunk);
     } else {
       lastLogPos = 0; // log was rotated/truncated
     }
@@ -642,17 +647,23 @@ setInterval(() => {
       if (data.length >= last) {
         const chunk = data.slice(last);
         rootLogMarks.set(logPath, data.length);
-        if (chunk.trim()) {
-          for (const line of chunk.split('\n')) {
-            if (line.trim()) sendProgress('hooklog', line);
-          }
-        }
+        if (chunk.trim()) relay(chunk);
       } else {
         rootLogMarks.set(logPath, 0);
       }
     }
+    // Prune marks for dead processes
+    if (rootLogMarks.size > 32) rootLogMarks.clear();
   } catch {}
 }, 700);
+
+// Survive unexpected async errors instead of taking the whole app down.
+process.on('uncaughtException', (err) => {
+  try { sendProgress('log', `Internal warning: ${err.message || err}`); } catch {}
+});
+process.on('unhandledRejection', (err) => {
+  try { sendProgress('log', `Internal warning: ${err && err.message ? err.message : err}`); } catch {}
+});
 
 app.whenReady().then(() => {
   ensureDirs();
