@@ -774,16 +774,41 @@ static NEBULA_INIT: unsafe extern "C" fn() = nebula_hook_init;
 
 /// Wait for the runtime .so, install the trampoline, then run the queue loop.
 fn init_and_install() {
-    // Retry until libSoberRuntime.so shows up (bounded — 60 s).
+    // Announce liveness immediately so the GUI can tell the .so actually ran
+    // its constructor (queue dir is bind-mounted into the sandbox).
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let paths = nebula_core::NebulaPaths::root(PathBuf::from(home).join(".nebula"));
+        let _ = paths.ensure();
+        let q = ScriptQueue::new(&paths);
+        q.hook_set_status("WAITING");
+        q.hook_log("hook .so loaded — resolving Luau VM…");
+    }
+
+    // Retry until the Luau host library shows up. Bounded at 10 minutes —
+    // the user may sit on the login/home screen for a while before entering
+    // an experience (which is when the VM gets mapped).
     let mut tries = 0;
     loop {
         if unsafe { resolve_api() }.is_some() {
             break;
         }
         tries += 1;
-        if tries >= 300 {
-            eprintln!("[nebula] libSoberRuntime.so never appeared; hook inactive");
+        if tries >= 3000 {
+            eprintln!("[nebula] Luau host library never appeared; hook inactive");
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            let paths = nebula_core::NebulaPaths::root(PathBuf::from(home).join(".nebula"));
+            let q = ScriptQueue::new(&paths);
+            q.hook_set_status("FAILED");
+            q.hook_log("gave up: Luau VM library never appeared (10 min)");
             return;
+        }
+        if tries % 150 == 0 {
+            // progress ping every ~30 s
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            let paths = nebula_core::NebulaPaths::root(PathBuf::from(home).join(".nebula"));
+            let q = ScriptQueue::new(&paths);
+            q.hook_log(&format!("still resolving Luau VM… ({}s)", tries / 5));
         }
         std::thread::sleep(Duration::from_millis(200));
     }

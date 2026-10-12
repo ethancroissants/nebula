@@ -166,6 +166,28 @@ function procHasHook(pid) {
   }
 }
 
+// Seed the hook into a Sober process's filesystem root, whatever that root is
+// (the flatpak sandbox, or a chroot libloader prepared for the game).
+// Writes /etc/ld.so.preload there and copies the .so to a path that exists
+// inside that root (/tmp), so glibc picks the hook up at the next process
+// start — immune to environment scrubbing.
+function seedHookIntoProcRoot(pid, hookLib) {
+  try {
+    const root = `/proc/${pid}/root`;
+    const etc = path.join(root, 'etc');
+    fs.mkdirSync(etc, { recursive: true });
+    // Copy the .so into the root's /tmp so the path is valid in that root.
+    fs.mkdirSync(path.join(root, 'tmp'), { recursive: true });
+    const target = path.join(root, 'tmp', 'libnebula_hook.so');
+    fs.copyFileSync(hookLib, target);
+    fs.chmodSync(target, 0o755);
+    fs.writeFileSync(path.join(etc, 'ld.so.preload'), `${target}\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function anyProcHasHook() {
   const procs = await findSoberProcesses();
   for (const proc of procs) {
@@ -385,6 +407,7 @@ ipcMain.handle('nebula:launchAndInject', async () => {
     const started = Date.now();
     const deadline = started + 120000;
     let lastNotice = 0;
+    let seededRoots = new Set();
     while (Date.now() < deadline) {
       await sleep(700);
       const elapsed = Math.round((Date.now() - started) / 1000);
@@ -397,9 +420,25 @@ ipcMain.handle('nebula:launchAndInject', async () => {
           return { ok: true, injected: true };
         }
       } catch {}
+
       procs = await findSoberProcesses();
       if (procs.length === 0) continue;
-      if (procs.some((p) => procHasHook(p.pid))) {
+      const anyHook = procs.some((p) => procHasHook(p.pid));
+
+      // Seed /etc/ld.so.preload into EVERY Sober process's filesystem view.
+      // The game process may run in a chroot prepared by Sober's loader, with
+      // its own /etc — the flatpak-runtime preload we wrote at apply time
+      // doesn't exist there. Writing via /proc/<pid>/root covers both the
+      // sandbox root and any chroot the game ends up in. The .so is copied
+      // next to it so the preload path always resolves inside that root.
+      for (const proc of procs) {
+        if (seededRoots.has(proc.pid)) continue;
+        if (seedHookIntoProcRoot(proc.pid, hookLib)) {
+          seededRoots.add(proc.pid);
+        }
+      }
+
+      if (anyHook) {
         if (Date.now() - lastNotice > 5000) {
           lastNotice = Date.now();
           sendProgress('waiting', `Hook .so mapped — waiting for VM capture… (${elapsed}s)`);
