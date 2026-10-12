@@ -847,13 +847,20 @@ ipcMain.handle('nebula:launchAndInject', async () => {
           try {
             const inj = findInjectHelper(hookLib);
             if (inj) {
-              // Relax Yama here rather than letting the injector do it: this
-              // is the GUI process, so this is where a password prompt can
-              // actually be shown to the user. The injector is told the scope
-              // is already handled so it never tries to sudo on its own.
-              const res = await withYamaRelaxed(() =>
-                run(`"${inj}" /tmp/libnebula_hook.so --yama-relaxed`, 30000),
-              );
+              // Try with no privileges first. Joining the target's user
+              // namespace (which the injector does itself) is normally enough,
+              // and asking for admin rights on every single launch would be
+              // both noisy and unnecessary.
+              let res = await run(`"${inj}" /tmp/libnebula_hook.so`, 30000);
+              if (!res.ok && /EPERM/.test(res.stderr || '')) {
+                // Refused on capability grounds. Relaxing Yama is a kernel
+                // policy change and does need root, so this is where a dialog
+                // is warranted. The injector is told the scope is handled so
+                // it never tries to sudo on its own.
+                res = await withYamaRelaxed(() =>
+                  run(`"${inj}" /tmp/libnebula_hook.so --yama-relaxed`, 30000),
+                );
+              }
               (res.stdout || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', l));
               (res.stderr || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', l));
             } else {

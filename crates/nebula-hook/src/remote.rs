@@ -143,8 +143,12 @@ fn stop_all_threads(pid: i32) -> Result<Vec<i32>, String> {
                 continue;
             }
             if e.raw_os_error() == Some(EPERM) {
+                // Deliberately NOT blaming Yama. Observed on real Sober:
+                // scope 0 still gets EPERM, and so does root. The refusal is
+                // the kernel's CAP_SYS_PTRACE check against the *user
+                // namespace*, which no ptrace_scope value can satisfy.
                 return Err(
-                    "ATTACH denied (EPERM) - ptrace_scope blocks attaching to a non-child process"
+                    "ATTACH denied (EPERM) - no CAP_SYS_PTRACE over the target's user namespace"
                         .into(),
                 );
             }

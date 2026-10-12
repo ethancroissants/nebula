@@ -149,6 +149,135 @@ fn set_yama_scope(value: u32) -> bool {
         .unwrap_or(false)
 }
 
+// --- user namespaces -----------------------------------------------------
+//
+// Sober is a Flatpak app: bwrap puts it in a child user namespace owned by
+// the launching user. Attaching from the parent namespace is refused, and
+// that refusal is NOT Yama: it is the kernel's CAP_SYS_PTRACE check, which
+// asks "are you capable *in the tracee's user namespace*". Relaxing
+// ptrace_scope to 0 does not answer that question, which is exactly what we
+// observed -- scope 0, still EPERM.
+//
+// Becoming a member of that namespace does answer it. So: join the target's
+// user namespace, map ourselves to root inside it, and attach from there.
+
+fn userns_link(pid: i32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/ns/user"))
+        .ok()
+        .map(|p| p.display().to_string())
+}
+
+fn command_on_path(cmd: &str) -> bool {
+    let path = env::var("PATH").unwrap_or_default();
+    path.split(':').any(|dir| {
+        if dir.is_empty() {
+            return false;
+        }
+        std::fs::metadata(format!("{dir}/{cmd}")).is_ok()
+    })
+}
+
+fn status_field(pid: i32, field: &str) -> String {
+    let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+        return "(unreadable)".into();
+    };
+    status
+        .lines()
+        .find(|l| l.starts_with(field))
+        .and_then(|l| l.split_once(':'))
+        .map(|(_, v)| v.trim().to_string())
+        .unwrap_or_else(|| "(absent)".into())
+}
+
+/// Everything we can cheaply learn about why an attach was refused. Printed
+/// on failure so the next run settles the question instead of guessing at it.
+fn diagnostics(pid: i32) -> String {
+    let ours = userns_link(std::process::id() as i32).unwrap_or_else(|| "(unknown)".into());
+    let theirs = userns_link(pid).unwrap_or_else(|| "(unreadable)".into());
+    let same_ns = ours == theirs;
+    let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).is_ok();
+    let tracer = status_field(pid, "TracerPid");
+    let tracer_pid = tracer.split_whitespace().next().unwrap_or("?");
+
+    let mut out = format!(
+        "  diagnostics for pid {pid}:\n\
+         \x20   yama ptrace_scope : {}\n\
+         \x20   our user namespace : {ours}\n\
+         \x20   target user ns    : {theirs}{}\n\
+         \x20   target Uid/Gid    : {} / {}\n\
+         \x20   TracerPid         : {tracer}\n\
+         \x20   /proc/pid/maps    : {}\n\
+         \x20   nsenter available : {}",
+        yama_scope()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "(absent)".into()),
+        if same_ns { "  [SAME NAMESPACE]" } else { "  [DIFFERENT]" },
+        status_field(pid, "Uid"),
+        status_field(pid, "Gid"),
+        if maps { "readable" } else { "NOT readable" },
+        if command_on_path("nsenter") { "yes" } else { "no" },
+    );
+    if tracer_pid != "0" {
+        out.push_str("\n  !! someone is ALREADY tracing this process");
+    }
+    out
+}
+
+/// Re-run ourselves inside `pid`'s user namespace. Returns Some(true) only if
+/// the nested run actually injected.
+fn reexec_in_target_userns(pid: i32, lib: &str, explicit_pid: Option<i32>) -> Option<bool> {
+    if !command_on_path("nsenter") {
+        eprintln!("[nebula-inject] nsenter not installed — cannot join the target's user namespace");
+        return None;
+    }
+    let exe = match env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[nebula-inject] cannot locate self for namespace re-exec: {e}");
+            return None;
+        }
+    };
+
+    // Being uid 0 *inside* the namespace is what grants a full capability set
+    // there (a process with euid 0 in a userns holds every capability in it).
+    // nsenter has no --map-root-user — that is unshare's spelling — so
+    // --setuid/--setgid is the equivalent. The second variant just joins and
+    // keeps our credentials, for sandboxes that do not map uid 0.
+    let variants: [&[&str]; 2] = [
+        &["--setuid=0", "--setgid=0"],
+        &["--preserve-credentials"],
+    ];
+
+    for (n, flags) in variants.iter().enumerate() {
+        let mut cmd = Command::new("nsenter");
+        cmd.arg("--user")
+            .arg("--target")
+            .arg(pid.to_string());
+        for f in *flags {
+            cmd.arg(f);
+        }
+        cmd.arg(&exe).arg("--in-userns");
+        if let Some(p) = explicit_pid {
+            cmd.arg(p.to_string());
+        }
+        cmd.arg(lib);
+        if n == 0 {
+            eprintln!("[nebula-inject] joining pid {pid}'s user namespace and retrying from inside…");
+        } else {
+            eprintln!("[nebula-inject] retrying without remapping uid…");
+        }
+        match cmd.status() {
+            Ok(st) if st.success() => return Some(true),
+            Ok(_) => continue,
+            Err(e) => {
+                eprintln!("[nebula-inject] nsenter failed to start: {e}");
+                return None;
+            }
+        }
+    }
+    Some(false)
+}
+
 fn main() -> ExitCode {
     // --yama-relaxed: the caller (the GUI) has already relaxed Yama and will
     // restore it, so never escalate from in here. Nebula's front-end is the
@@ -159,6 +288,13 @@ fn main() -> ExitCode {
         .filter(|a| a != "--yama-relaxed")
         .collect();
     let yama_relaxed = env::args().any(|a| a == "--yama-relaxed");
+    // Set when we re-exec'd ourselves inside the target's user namespace.
+    // Guards against recursing: from in there we are already the right
+    // context, so a second EPERM is a real answer, not a reason to re-join.
+    let in_userns = env::args().any(|a| a == "--in-userns");
+    if in_userns {
+        eprintln!("[nebula-inject] running inside the target's user namespace");
+    }
     if argv.first().map(|s| s == "--spawn").unwrap_or(false) {
         if argv.len() < 3 {
             eprintln!("usage: nebula-inject --spawn <lib> <program> [args...]");
@@ -201,6 +337,42 @@ fn main() -> ExitCode {
     let (code, denied) = inject_into(&pids, &lib);
     if code == ExitCode::SUCCESS {
         return ExitCode::SUCCESS;
+    }
+
+    if denied && in_userns {
+        // We are already inside the namespace and still refused — so it is
+        // not the namespace, and not Yama. Dump everything we can see.
+        for pid in &pids {
+            eprintln!("{}", diagnostics(*pid));
+        }
+        eprintln!(
+            "[nebula-inject] refused even from inside the target's user namespace.\n\
+             \x20             This is the honest failure: the kernel is denying ptrace for a\n\
+             \x20             reason we cannot talk our way out of (a tracer already attached,\n\
+             \x20             or an LSM). The diagnostics above say which."
+        );
+        return ExitCode::from(1);
+    }
+
+    if denied {
+        // Try from inside the target's user namespace first: that is the
+        // fix for a plain Flatpak sandbox, and it needs no privileges at all.
+        let target = *pids.first().unwrap_or(&0);
+        let attempted = if target > 0 {
+            reexec_in_target_userns(target, &lib, explicit_pid)
+        } else {
+            None
+        };
+        // Report what we could learn either way — this is the run that tells
+        // us whether the namespace was the actual blocker.
+        for pid in &pids {
+            eprintln!("{}", diagnostics(*pid));
+        }
+        match attempted {
+            Some(true) => return ExitCode::SUCCESS,
+            Some(false) => return ExitCode::from(1),
+            None => { /* fall through to the older paths */ }
+        }
     }
 
     if denied && yama_relaxed {
