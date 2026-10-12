@@ -159,29 +159,29 @@ unsafe fn resolve_api() -> Option<Api> {
     // process startup (we're preloaded via ld.so.preload) can hit recursive
     // loader locks and crash the host process.
     let maps = read_self_maps();
-    let vm_candidate = maps
+    if !maps
         .iter()
-        .any(|n| n.contains("libSoberRuntime") || n.contains("libstanpreg"));
-
-    // 1+2: NOLOAD dlopen, then global scope.
-    let mut handle = dlopen(c"libSoberRuntime.so".as_ptr(), RTLD_LAZY | RTLD_NOLOAD);
-    if handle.is_null() {
-        handle = RTLD_DEFAULT;
+        .any(|n| n.contains("libSoberRuntime") || n.contains("libstanpreg"))
+    {
+        return None;
     }
+
+    // 1: NOLOAD dlopen by soname.
+    let mut handle = dlopen(c"libSoberRuntime.so".as_ptr(), RTLD_LAZY | RTLD_NOLOAD);
     if !handle.is_null() {
         if let Some(api) = resolve_from(handle) {
             return Some(api);
         }
     }
 
-    if !vm_candidate {
-        return None;
-    }
-
-    // 3: walk /proc/self/maps and dlopen each mapped .so with NOLOAD, probing
-    // for lua_pcall. This catches statically-renamed objects. Only run once
-    // a VM library is mapped (see gate above).
+    // 2: dlopen ONLY the mapped Luau host libraries by their exact path —
+    // never walk-and-probe every mapped object. Probing unrelated binaries
+    // (translated Roblox blobs, APK natives) with dlopen has crash potential
+    // in the game process; the VM host is a known, safe target.
     for name in maps {
+        if !(name.contains("libSoberRuntime") || name.contains("libstanpreg")) {
+            continue;
+        }
         let cname = match CString::new(name.as_str()) {
             Ok(c) => c,
             Err(_) => continue,

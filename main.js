@@ -615,8 +615,9 @@ async function getHookStatus() {
 // fast inside the game — cap how much we relay per tick and keep a ring
 // buffer of recent lines so a flood can't wedge the renderer.
 let lastLogPos = 0;
-let rootLogMarks = new Map(); // path -> last size
+const rootLogMarks = new Map(); // path -> last size
 const MAX_LOG_LINES_PER_TICK = 40;
+let marksInitialized = false;
 setInterval(() => {
   const relay = (text) => {
     const lines = text.split('\n').filter((l) => l.trim());
@@ -635,7 +636,9 @@ setInterval(() => {
     }
   } catch {}
 
-  // Mirrors inside sandbox/chroot roots
+  // Mirrors inside sandbox/chroot roots. On the first tick, mark existing
+  // content as already-seen so stale logs from a previous session don't
+  // replay into a fresh console.
   try {
     for (const proc of findSoberProcessesSync()) {
       const logPath = `/proc/${proc.pid}/root/tmp/.nebula/queue/log`;
@@ -643,6 +646,10 @@ setInterval(() => {
       try {
         data = fs.readFileSync(logPath, 'utf8');
       } catch { continue; }
+      if (!marksInitialized) {
+        rootLogMarks.set(logPath, data.length);
+        continue;
+      }
       const last = rootLogMarks.get(logPath) || 0;
       if (data.length >= last) {
         const chunk = data.slice(last);
@@ -652,6 +659,7 @@ setInterval(() => {
         rootLogMarks.set(logPath, 0);
       }
     }
+    marksInitialized = true;
     // Prune marks for dead processes
     if (rootLogMarks.size > 32) rootLogMarks.clear();
   } catch {}
