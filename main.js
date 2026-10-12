@@ -435,6 +435,7 @@ ipcMain.handle('nebula:launchAndInject', async () => {
     const deadline = started + 120000;
     let lastNotice = 0;
     let seededRoots = new Set();
+    let diagDone = false;
     while (Date.now() < deadline) {
       await sleep(700);
       const elapsed = Math.round((Date.now() - started) / 1000);
@@ -465,6 +466,27 @@ ipcMain.handle('nebula:launchAndInject', async () => {
         seededRoots.add(proc.pid);
         if (ok) {
           sendProgress('log', `Seeded hook into pid ${proc.pid}'s filesystem root`);
+        }
+      }
+
+      // One-time deep diagnostic ~8s in: what does the sandbox's /etc
+      // actually contain? Answers whether the runtime preload propagated.
+      if (!diagDone && elapsed >= 8) {
+        diagDone = true;
+        for (const proc of procs) {
+          try {
+            const pre = fs.readFileSync(`/proc/${proc.pid}/root/etc/ld.so.preload`, 'utf8').trim();
+            sendProgress('log', `pid ${proc.pid} /etc/ld.so.preload = ${pre || '(empty)'}`);
+          } catch (e) {
+            sendProgress('log', `pid ${proc.pid} /etc/ld.so.preload unreadable (${e.code})`);
+          }
+          try {
+            const comm = fs.readFileSync(`/proc/${proc.pid}/comm`, 'utf8').trim();
+            const maps = fs.readFileSync(`/proc/${proc.pid}/maps`, 'utf8');
+            const hasHook = maps.includes('libnebula_hook');
+            const hasLoader = maps.includes('libloader') || maps.includes('libbadcpu');
+            sendProgress('log', `pid ${proc.pid} (${comm}): hook=${hasHook ? 'yes' : 'no'} loader=${hasLoader ? 'yes' : 'no'}`);
+          } catch {}
         }
       }
 
