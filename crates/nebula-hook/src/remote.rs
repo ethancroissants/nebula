@@ -230,7 +230,7 @@ fn libc_candidates(maps: &str) -> Vec<(u64, String)> {
         let mut parts = line.split_whitespace();
         let Some(range) = parts.next() else { continue };
         let _perms = parts.next();
-        let offset = parts.next().unwrap_or("0");
+        let offset_str = parts.next().unwrap_or("0");
         let Some(path) = parts.last() else { continue };
         if !path.starts_with('/') {
             continue; // anonymous / [stack] / [heap]
@@ -239,14 +239,17 @@ fn libc_candidates(maps: &str) -> Vec<(u64, String)> {
         if !(path.contains("libc.so") || path.contains("libc-") || path.contains("libdl.so")) {
             continue;
         }
-        if offset != "00000000" {
-            continue; // only the first (offset-0) segment carries the base
-        }
         let Ok(start) = u64::from_str_radix(range.split('-').next().unwrap_or(""), 16) else {
             continue;
         };
+        let Ok(offset) = u64::from_str_radix(offset_str, 16) else {
+            continue;
+        };
+        // Compute load base: for offset-0 segments, base = start.
+        // For non-offset-0 segments (e.g. flatpak sandbox), base = start - offset.
+        let base = if offset == 0 { start } else { start - offset };
         if !candidates.iter().any(|(_, p)| *p == path) {
-            candidates.push((start, path));
+            candidates.push((base, path));
         }
     }
     candidates
