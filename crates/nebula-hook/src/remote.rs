@@ -24,110 +24,69 @@
 
 use std::fs;
 
-type CInt = i32;
+use libc::{
+    c_void, ptrace as libc_ptrace, user_regs_struct, waitpid as libc_waitpid, PTRACE_ATTACH,
+    PTRACE_CONT, PTRACE_DETACH, PTRACE_GETREGS, PTRACE_PEEKDATA, PTRACE_POKEDATA, PTRACE_SETREGS,
+    WUNTRACED,
+};
 
 const WORD: u64 = 8;
 /// RTLD_NOW for the remote dlopen call.
 const RTLD_NOW: u64 = 2;
 /// A return value no real dlopen can produce (addresses are page-aligned).
 const SENTINEL: u64 = 0x5A5A_5A5A_5A5A_5A55;
+/// Fake return address for the injected call: canonical (so no #GP) but
+/// guaranteed unmapped, so the `ret` at the end of dlopen faults cleanly and
+/// hands control back to the tracer with RAX still holding the handle.
+const TRAP_ADDR: u64 = 0x0000_0000_0000_1F00;
+/// errno value for "operation not permitted" (Yama ptrace_scope).
+const EPERM: i32 = 1;
+/// SIGTRAP - a stop we did not schedule; swallow it rather than letting it
+/// kill the host.
+const SIGTRAP: i32 = 5;
 
-extern "C" {
-    fn ptrace(request: CInt, pid: i32, addr: *mut core::ffi::c_void, data: *mut core::ffi::c_void) -> i64;
-    fn waitpid(pid: i32, status: *mut CInt, options: CInt) -> i32;
-    fn __errno_location() -> *mut CInt;
-}
-
-const PTRACE_ATTACH: CInt = 16;
-const PTRACE_DETACH: CInt = 17;
-const PTRACE_GETREGS: CInt = 12;
-const PTRACE_SETREGS: CInt = 13;
-const PTRACE_CONT: CInt = 7;
-const WUNTRACED: CInt = 0x0000_0004;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct UserRegs {
-    r15: u64,
-    r14: u64,
-    r13: u64,
-    r12: u64,
-    rbp: u64,
-    rbx: u64,
-    r11: u64,
-    r10: u64,
-    r9: u64,
-    r8: u64,
-    rax: u64,
-    rcx: u64,
-    rdx: u64,
-    rsi: u64,
-    rdi: u64,
-    orig_rax: u64,
-    rip: u64,
-    cs: u64,
-    eflags: u64,
-    rsp: u64,
-    ss: u64,
-}
-
-fn errno() -> CInt {
-    unsafe { *__errno_location() }
-}
+// NOTE: the real libc ptrace/waitpid must be used here. Hand-rolled
+// `extern "C"` declarations of them compiled but misbehaved at runtime
+// (waitpid returned EINVAL on a perfectly valid child), so the bindings come
+// from the `libc` crate, which matches the platform ABI exactly.
 
 /// PTRACE_PEEKDATA: read one 8-byte word from the tracee.
 fn peek(pid: i32, addr: u64) -> Result<u64, String> {
-    let saved = errno();
-    unsafe { *__errno_location() = 0 };
-    let v = unsafe { ptrace(2 /* PTRACE_PEEKDATA */, pid, addr as *mut _, core::ptr::null_mut()) };
-    let e = errno();
-    unsafe { *__errno_location() = saved };
-    if v == -1 && e != 0 {
-        return Err(format!("peek @0x{addr:x}: errno {e}"));
+    let v = unsafe { libc_ptrace(PTRACE_PEEKDATA, pid, addr as *mut c_void, core::ptr::null_mut::<c_void>()) };
+    if v == -1 {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error().is_some() {
+            return Err(format!("peek @0x{addr:x}: {e}"));
+        }
     }
     Ok(v as u64)
 }
 
 /// PTRACE_POKEDATA: write one 8-byte word into the tracee.
 fn poke(pid: i32, addr: u64, value: u64) -> Result<(), String> {
-    let rv = unsafe { ptrace(5 /* PTRACE_POKEDATA */, pid, addr as *mut _, value as *mut _) };
+    let rv =
+        unsafe { libc_ptrace(PTRACE_POKEDATA, pid, addr as *mut c_void, value as *mut c_void) };
     if rv == -1 {
-        return Err(format!("poke @0x{addr:x}: errno {}", errno()));
+        return Err(format!(
+            "poke @0x{addr:x}: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     Ok(())
 }
 
-fn getregs(pid: i32) -> Result<UserRegs, String> {
-    let mut r = UserRegs {
-        r15: 0, r14: 0, r13: 0, r12: 0, rbp: 0, rbx: 0, r11: 0, r10: 0,
-        r9: 0, r8: 0, rax: 0, rcx: 0, rdx: 0, rsi: 0, rdi: 0, orig_rax: 0,
-        rip: 0, cs: 0, eflags: 0, rsp: 0, ss: 0,
-    };
-    if unsafe {
-        ptrace(
-            PTRACE_GETREGS,
-            pid,
-            core::ptr::null_mut(),
-            &mut r as *mut UserRegs as *mut _,
-        )
-    } == -1
-    {
-        return Err(format!("GETREGS: errno {}", errno()));
+fn getregs(pid: i32) -> Result<user_regs_struct, String> {
+    let mut r = unsafe { core::mem::zeroed::<user_regs_struct>() };
+    if unsafe { libc_ptrace(PTRACE_GETREGS, pid, core::ptr::null_mut::<c_void>(), &mut r as *mut _) } == -1 {
+        return Err(format!("GETREGS: {}", std::io::Error::last_os_error()));
     }
     Ok(r)
 }
 
-fn setregs(pid: i32, r: &UserRegs) -> Result<(), String> {
-    if unsafe {
-        ptrace(
-            PTRACE_SETREGS,
-            pid,
-            core::ptr::null_mut(),
-            r as *const UserRegs as *mut _,
-        )
-    } == -1
-    {
-        return Err(format!("SETREGS: errno {}", errno()));
+fn setregs(pid: i32, r: &user_regs_struct) -> Result<(), String> {
+    let rptr = r as *const user_regs_struct as *mut c_void;
+    if unsafe { libc_ptrace(PTRACE_SETREGS, pid, core::ptr::null_mut::<c_void>(), rptr) } == -1 {
+        return Err(format!("SETREGS: {}", std::io::Error::last_os_error()));
     }
     Ok(())
 }
@@ -145,32 +104,51 @@ fn list_threads(pid: i32) -> Vec<i32> {
     out
 }
 
-/// Blocking waitpid until `tid` reports a stop.
-fn wait_stop(tid: i32) -> Result<(), String> {
-    let mut status: CInt = 0;
+/// Blocking waitpid until `tid` reports a stop; returns the raw wait status.
+///
+/// `__WALL` is required: without it, waiting on a non-leader thread (any of
+/// Sober's worker threads) fails with ECHILD.
+fn wait_stop(tid: i32) -> Result<i32, String> {
+    let mut status: i32 = 0;
     loop {
-        let rv = unsafe { waitpid(tid, &mut status, WUNTRACED) };
+        let rv = unsafe { libc_waitpid(tid, &mut status, WUNTRACED | libc::__WALL) };
         if rv == tid {
-            return Ok(());
+            return Ok(status);
         }
         if rv == -1 {
-            return Err(format!("waitpid {tid}: errno {}", errno()));
+            return Err(format!("waitpid {tid}: {}", std::io::Error::last_os_error()));
         }
     }
 }
 
+/// Signal number that stopped the tracee (from a raw wait status).
+fn stopsig(status: i32) -> i32 {
+    status & 0x7f
+}
+
 /// Attach to (stop) every thread of `pid`.
+///
+/// Yama's `ptrace_scope` blocks this for anyone but an ancestor of the tracee
+/// (scope 1+) - callers get EPERM and decide whether to retry elevated.
 fn stop_all_threads(pid: i32) -> Result<Vec<i32>, String> {
     let tids = list_threads(pid);
     for &tid in &tids {
-        let rv = unsafe { ptrace(PTRACE_ATTACH, tid, core::ptr::null_mut(), core::ptr::null_mut()) };
+        let rv =
+            unsafe { libc_ptrace(PTRACE_ATTACH, tid, core::ptr::null_mut::<c_void>(), core::ptr::null_mut::<c_void>()) };
         if rv != 0 {
-            // The thread may have exited between listing and attach — only
+            let e = std::io::Error::last_os_error();
+            // The thread may have exited between listing and attach - only
             // fatal if it's the main thread (whose TID equals the PID).
             if tid != pid {
                 continue;
             }
-            return Err(format!("ATTACH main thread: errno {}", errno()));
+            if e.raw_os_error() == Some(EPERM) {
+                return Err(
+                    "ATTACH denied (EPERM) - ptrace_scope blocks attaching to a non-child process"
+                        .into(),
+                );
+            }
+            return Err(format!("ATTACH main thread: {e}"));
         }
         wait_stop(tid)?;
     }
@@ -181,42 +159,61 @@ fn stop_all_threads(pid: i32) -> Result<Vec<i32>, String> {
 fn detach_all(tids: &[i32]) {
     for &tid in tids {
         unsafe {
-            ptrace(PTRACE_DETACH, tid, core::ptr::null_mut(), core::ptr::null_mut());
+            libc_ptrace(PTRACE_DETACH, tid, core::ptr::null_mut::<c_void>(), core::ptr::null_mut::<c_void>());
         }
     }
 }
 
-/// Resolve `symbol`'s address inside the *target* process: find its mapped
-/// libc, parse that ELF's .dynsym, return `base + st_value`.
+/// Resolve `symbol`'s address inside the *target* process.
+///
+/// Two traps this has to avoid (both bit us in the field):
+///   * the base address is the start of the mapping whose *file offset is 0*,
+///     NOT the start of the `r-xp` segment (that one is offset by ~0x26000,
+///     which yields a jump into garbage rather than dlopen);
+///   * the mapped path is the one seen from INSIDE the sandbox (the flatpak
+///     runtime's libc), which does not exist on the host at that path - the
+///     ELF must be read through /proc/<pid>/root.
 pub fn target_symbol_addr(pid: i32, symbol: &str) -> Option<u64> {
     let maps = fs::read_to_string(format!("/proc/{pid}/maps")).ok()?;
-    let mut base = None;
-    let mut path = None;
+
+    // Collect every mapped file that could plausibly export dlopen.
+    // base = start of the segment whose file offset is 0.
+    let mut candidates: Vec<(u64, String)> = Vec::new();
     for line in maps.lines() {
-        if !(line.contains("libc.so") || line.contains("libc-")) {
-            continue;
-        }
         let mut parts = line.split_whitespace();
-        let range = parts.next()?;
-        let perms = parts.next()?;
-        if !perms.contains('x') {
+        let Some(range) = parts.next() else { continue };
+        let _perms = parts.next();
+        let offset = parts.next().unwrap_or("0");
+        let Some(path) = parts.last() else { continue };
+        if !path.starts_with('/') {
             continue;
         }
-        let p = parts.last()?.to_string();
-        if !p.starts_with('/') {
+        let path = path.to_string();
+        let is_libc = path.contains("libc.so") || path.contains("libc-");
+        let is_libdl = path.contains("libdl.so");
+        if !(is_libc || is_libdl) {
             continue;
         }
-        base = u64::from_str_radix(range.split('-').next()?, 16).ok();
-        path = Some(p);
-        break;
+        if offset != "00000000" {
+            continue; // only the first (offset-0) segment carries the base
+        }
+        let Ok(start) = u64::from_str_radix(range.split('-').next().unwrap_or(""), 16) else {
+            continue;
+        };
+        if !candidates.iter().any(|(_, p)| *p == path) {
+            candidates.push((start, path));
+        }
     }
-    let base = base?;
-    let path = path?;
-    let data = fs::read(&path).ok()?;
-    let st_value = elf_dynsym_lookup(&data, symbol.as_bytes())?;
-    // For shared objects st_value is a virtual address relative to the load
-    // base (first PT_LOAD maps at `base` in /proc/<pid>/maps).
-    Some(base + st_value)
+
+    for (base, path) in candidates {
+        // Read the TARGET's copy of the file, not the host's.
+        let host_path = format!("/proc/{pid}/root{path}");
+        let Ok(data) = fs::read(&host_path) else { continue };
+        if let Some(st_value) = elf_dynsym_lookup(&data, symbol.as_bytes()) {
+            return Some(base + st_value);
+        }
+    }
+    None
 }
 
 /// Minimal ELF64 .dynsym lookup: return `st_value` for `symbol`, if defined.
@@ -225,14 +222,14 @@ pub fn elf_dynsym_lookup(data: &[u8], symbol: &[u8]) -> Option<u64> {
         return None;
     }
     let u16_at = |o: usize| -> Option<u16> {
-        Some(u16::from_le_bytes([
-            *data.get(o)?, *data.get(o.checked_add(1)?)?,
-        ]))
+        Some(u16::from_le_bytes([*data.get(o)?, *data.get(o.checked_add(1)?)?]))
     };
     let u32_at = |o: usize| -> Option<u32> {
         Some(u32::from_le_bytes([
-            *data.get(o)?, *data.get(o.checked_add(1)?)?,
-            *data.get(o.checked_add(2)?)?, *data.get(o.checked_add(3)?)?,
+            *data.get(o)?,
+            *data.get(o.checked_add(1)?)?,
+            *data.get(o.checked_add(2)?)?,
+            *data.get(o.checked_add(3)?)?,
         ]))
     };
     let u64_at = |o: usize| -> Option<u64> {
@@ -379,8 +376,9 @@ pub fn elf_file_exports(path: &str, symbol: &[u8]) -> bool {
 /// target — its stderr will carry the loader's error), and Err on any
 /// ptrace/ELF failure. On every path the tracee is restored and detached.
 pub fn inject_dlopen(pid: i32, lib_path: &str) -> Result<bool, String> {
-    let dlopen_addr =
-        target_symbol_addr(pid, "dlopen").ok_or("dlopen not found in target's mapped libc")?;
+    let dlopen_addr = target_symbol_addr(pid, "dlopen")
+        .or_else(|| target_symbol_addr(pid, "__libc_dlopen_mode"))
+        .ok_or("dlopen not found in target's mapped libc")?;
 
     // 1. stop all threads
     let tids = stop_all_threads(pid)?;
@@ -391,23 +389,39 @@ pub fn inject_dlopen(pid: i32, lib_path: &str) -> Result<bool, String> {
         // 2. save registers
         let saved = getregs(victim)?;
 
-        // 3. scratch area: 2 KiB below the current rsp, 16-byte aligned.
-        //    Layout: [area .. area+str) = path string (16-byte aligned),
-        //            rsp = area + align_up(str, 16) — the call's own frame
-        //            grows DOWN from rsp, away from the string, so dlopen
-        //            can never clobber the path while it runs.
+        // 3. Scratch area 8 KiB below the original rsp. A callee's frame
+        //    grows DOWNWARD from its entry rsp, so every byte it writes sits
+        //    below new_rsp -- which means the path string has to go ABOVE it:
+        //
+        //      [area .. area+str_words)    path string (NUL-terminated)
+        //      [area+str_words .. new_rsp) padding: the callee's frame
+        //      [new_rsp - 8]               fake return address
+        //
+        //    4 KiB of callee frame is far more than dlopen ever needs.
         let path = lib_path.as_bytes();
         let str_len = path.len() + 1;
         let str_words = (str_len as u64 + WORD - 1) / WORD;
-        let area = (saved.rsp - 2048) & !0xF;
+        let area = (saved.rsp - 8192) & !0xF;
         let str_addr = area;
-        let new_rsp = area + str_words * WORD;
+        // At function entry rsp == 8 (mod 16): that is the state a `call`
+        // leaves behind, with the return address already popped into rip.
+        // So point rsp just past our fake return slot, aligned to 8.
+        let new_rsp = ((area + str_words * WORD - 4096) & !0xF) + 8;
+        let ret_slot = new_rsp - WORD; // [ret_slot] = fake return address
 
-        // Back up the words we're about to overwrite.
-        let mut backup = Vec::with_capacity(str_words as usize);
-        for i in 0..str_words {
+        // Back up the words we are about to overwrite (string + ret slot).
+        let total_words = str_words + 1;
+        let mut backup = Vec::with_capacity(total_words as usize);
+        for i in 0..total_words {
             backup.push(peek(victim, area + i * WORD)?);
         }
+
+        // Fake return address: a canonical-but-unmapped address, so when
+        // dlopen returns it faults on the instruction fetch and the tracer
+        // immediately regains control with rax = the dlopen handle.
+        // Without this, `ret` pops whatever garbage sits on the stack and
+        // jumps into the weeds.
+        poke(victim, ret_slot, TRAP_ADDR)?;
 
         // Write the NUL-terminated path, word by word.
         let mut bytes = path.to_vec();
@@ -431,19 +445,32 @@ pub fn inject_dlopen(pid: i32, lib_path: &str) -> Result<bool, String> {
         regs.rip = dlopen_addr;
         setregs(victim, &regs)?;
 
-        // 5. run until the sentinel is replaced by the real return value
+        // 5. run until dlopen returns. Its `ret` jumps to TRAP_ADDR, so the
+        //    only stop we should see is that fault, with RAX = the handle.
+        //    Anything else (a real signal, a mid-call stop) is forwarded to
+        //    the tracee and we keep going.
         let mut ok = false;
         let mut returned = false;
-        for _ in 0..20_000 {
+        let mut sig = 0;
+        for _ in 0..100_000 {
+            // First iteration passes signal 0 (start/resume); later ones
+            // re-deliver whatever signal stopped us, so the host keeps
+            // behaving normally (SIGCHLD, SIGWINCH, ...).
             unsafe {
-                ptrace(PTRACE_CONT, victim, core::ptr::null_mut(), core::ptr::null_mut());
+                libc_ptrace(PTRACE_CONT, victim, core::ptr::null_mut::<c_void>(), sig as *mut c_void);
             }
-            wait_stop(victim)?;
+            let status = wait_stop(victim)?;
             let now = getregs(victim)?;
             if now.rax != SENTINEL {
                 ok = now.rax != 0;
                 returned = true;
                 break;
+            }
+            sig = stopsig(status);
+            if sig == SIGTRAP {
+                // A trap we did not intend (breakpoint inside the host).
+                // Swallow it rather than killing Sober.
+                sig = 0;
             }
         }
         if !returned {

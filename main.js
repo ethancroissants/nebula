@@ -238,6 +238,53 @@ async function anyProcHasHook() {
   return false;
 }
 
+// Remove any *stale* Nebula preload entries before launching.
+//
+// Older builds wrote the hook into the flatpak runtime's (and, on some
+// setups, the host's) /etc/ld.so.preload during the launch phase. That file
+// persists forever, so every later boot preloaded the hook into Sober from
+// process start — which is exactly what makes its check_security bail out.
+// The seed gate stops us *writing* too early, but it cannot undo a leftover
+// from an earlier run, so scrub it here. Only lines that point at our own
+// hook are touched; anything else is left alone.
+async function clearStalePreloads() {
+  const dirs = [...runtimeEtcDirs(), '/etc'];
+  let cleared = 0;
+  for (const etc of dirs) {
+    const file = path.join(etc, 'ld.so.preload');
+    let content;
+    try {
+      content = fs.readFileSync(file, 'utf8');
+    } catch {
+      continue; // absent or unreadable — nothing to clean
+    }
+    if (!/nebula/i.test(content)) continue;
+    const kept = content
+      .split('\n')
+      .filter((line) => line.trim() && !/nebula/i.test(line));
+    const cleaned = kept.length ? `${kept.join('\n')}\n` : '';
+    try {
+      fs.writeFileSync(file, cleaned);
+      cleared++;
+      log(`Cleared stale Nebula preload entry from ${file}`);
+    } catch (e) {
+      if (e.code === 'EACCES' || e.code === 'EPERM') {
+        const res = await run(
+          `sudo -n sh -c 'printf "%s" ${JSON.stringify(cleaned)} > "${file}"'`,
+          15000,
+        );
+        if (res.ok) {
+          cleared++;
+          log(`Cleared stale Nebula preload entry from ${file} (sudo)`);
+        } else {
+          log(`Could not clear ${file} — Sober may pre-crash. Run: sudo sh -c "echo -n > ${file}"`, 'warn');
+        }
+      }
+    }
+  }
+  return cleared;
+}
+
 // Write the hook path into the flatpak runtime's /etc/ld.so.preload (sandbox
 // /etc is sourced from it). glibc reads it at every process start inside the
 // sandbox regardless of environment. Tries the user runtime first, then a
@@ -475,6 +522,12 @@ ipcMain.handle('nebula:launchAndInject', async () => {
         await sleep(800);
       }
     }
+
+    // 1b. Scrub any preload entry a previous run left behind. A stale one
+    // puts the hook into Sober's maps at process start, which is precisely
+    // what its check_security rejects — the symptom looks identical to the
+    // hook "detecting" Sober, but the cause is an old file on disk.
+    await clearStalePreloads();
 
     // 2. Safe mode? Launch Sober untouched — no override, no seeding.
     if (prefs.safeMode) {
