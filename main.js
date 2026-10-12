@@ -183,7 +183,11 @@ function seedHookIntoProcRoot(pid, hookLib) {
     const target = path.join(root, 'tmp', 'libnebula_hook.so');
     fs.copyFileSync(hookLib, target);
     fs.chmodSync(target, 0o755);
-    fs.writeFileSync(path.join(etc, 'ld.so.preload'), `${target}\n`);
+    // CRITICAL: the preload entry must be the path as seen FROM INSIDE the
+    // root (/tmp/libnebula_hook.so), not the host-side /proc/<pid>/root
+    // spelling — inside the sandbox /proc is a different pid namespace and
+    // the host path doesn't resolve, so the loader silently skips it.
+    fs.writeFileSync(path.join(etc, 'ld.so.preload'), '/tmp/libnebula_hook.so\n');
     return true;
   } catch (e) {
     sendProgress('log', `Could not seed pid ${pid}: ${e.code || e}`);
@@ -476,7 +480,8 @@ ipcMain.handle('nebula:launchAndInject', async () => {
         for (const proc of procs) {
           try {
             const pre = fs.readFileSync(`/proc/${proc.pid}/root/etc/ld.so.preload`, 'utf8').trim();
-            sendProgress('log', `pid ${proc.pid} /etc/ld.so.preload = ${pre || '(empty)'}`);
+            const so = fs.existsSync(`/proc/${proc.pid}/root/tmp/libnebula_hook.so`);
+            sendProgress('log', `pid ${proc.pid} preload=${pre || '(empty)'} .so=${so ? 'present' : 'missing'}`);
           } catch (e) {
             sendProgress('log', `pid ${proc.pid} /etc/ld.so.preload unreadable (${e.code})`);
           }
