@@ -19,16 +19,18 @@ process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true';
 // Silence noisy fontconfig/va warnings that leak into the terminal on some distros.
 process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true';
 
-// Where the hook library might live, in priority order
+// Where the hook library might live, in priority order.
+// The copy bundled with the app comes FIRST — it always matches this exact
+// release. System/user install locations are fallbacks (they may be stale).
 const HOOK_CANDIDATES = [
+  path.join(__dirname, 'hook', 'libnebula_hook.so'),
+  path.join(__dirname, '..', 'hook', 'libnebula_hook.so'),
+  path.join(__dirname, 'libnebula_hook.so'),
   path.join(NEBULA_ROOT, 'lib', 'libnebula_hook.so'),
   path.join(os.homedir(), '.local', 'lib', 'nebula', 'libnebula_hook.so'),
   path.join(os.homedir(), '.local', 'lib', 'nebula', 'hook', 'libnebula_hook.so'),
   '/usr/lib/nebula/libnebula_hook.so',
   '/usr/local/lib/nebula/libnebula_hook.so',
-  path.join(__dirname, 'libnebula_hook.so'),
-  path.join(__dirname, 'hook', 'libnebula_hook.so'),
-  path.join(__dirname, '..', 'hook', 'libnebula_hook.so'),
   path.join(__dirname, 'target', 'release', 'libnebula_hook.so'),
 ];
 
@@ -232,11 +234,25 @@ async function applyOverride(hookLib) {
         seeded = true;
         break; // first writable runtime wins
       } catch (e) {
-        seedNotes.push(`runtime not writable: ${etc} (${e.code || e})`);
+        if (e.code === 'EACCES' || e.code === 'EPERM') {
+          // System install — try a non-interactive sudo before giving up.
+          const res = await run(
+            `sudo -n sh -c 'mkdir -p "${etc}" && printf "%s\\n" "${hookLib}" > "${etc}/ld.so.preload"'`,
+            15000,
+          );
+          if (res.ok) {
+            seedNotes.push(`runtime preload OK via sudo: ${etc}`);
+            seeded = true;
+            break;
+          }
+          seedNotes.push(`runtime not writable: ${etc} (system install — run: sudo sh -c 'mkdir -p "${etc}" && echo "${hookLib}" > "${etc}/ld.so.preload"')`);
+        } else {
+          seedNotes.push(`runtime seed failed: ${etc} (${e.code || e})`);
+        }
       }
     }
     if (!seeded) {
-      seedNotes.push('could not write ld.so.preload into any flatpak runtime (system install needs root)');
+      seedNotes.push('could not write ld.so.preload into any flatpak runtime');
     }
     for (const note of seedNotes) log(note, seeded ? 'ok' : 'warn');
   } catch {}
@@ -445,8 +461,9 @@ ipcMain.handle('nebula:launchAndInject', async () => {
       for (const proc of procs) {
         if (seededRoots.has(proc.pid)) continue;
         const ok = seedHookIntoProcRoot(proc.pid, hookLib);
+        // Cache failures too so we don't spam the console every 700 ms.
+        seededRoots.add(proc.pid);
         if (ok) {
-          seededRoots.add(proc.pid);
           sendProgress('log', `Seeded hook into pid ${proc.pid}'s filesystem root`);
         }
       }
@@ -479,26 +496,84 @@ async function getOverride() {
   return res.ok ? res.stdout : '';
 }
 
+// Harvest the hook's heartbeat + log from every Sober process root. The
+// game's chroot has its own /tmp/.nebula/queue — the plain ~/.nebula path
+// only covers processes that kept a real $HOME.
+function harvestQueueFromRoots() {
+  let status = '';
+  let logChunk = '';
+  try {
+    const procs = findSoberProcessesSync();
+    for (const proc of procs) {
+      // Heartbeat
+      if (!status) {
+        try {
+          status = fs.readFileSync(`/proc/${proc.pid}/root/tmp/.nebula/queue/status`, 'utf8').trim();
+        } catch {}
+      }
+      // Log tail
+      try {
+        const data = fs.readFileSync(`/proc/${proc.pid}/root/tmp/.nebula/queue/log`, 'utf8');
+        if (data) logChunk += (logChunk ? '\n' : '') + data;
+      } catch {}
+    }
+  } catch {}
+  return { status, logChunk };
+}
+
+// Synchronous process listing for the harvester (no await in fs walk).
+function findSoberProcessesSync() {
+  try {
+    const out = [];
+    for (const entry of fs.readdirSync('/proc')) {
+      const pid = parseInt(entry, 10);
+      if (isNaN(pid) || pid <= 0) continue;
+      try {
+        const comm = fs.readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
+        const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ');
+        if (/sober/i.test(comm) || /org\.vinegarhq\.Sober|sober/i.test(cmd)) {
+          out.push({ pid, comm, cmd });
+        }
+      } catch {}
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 async function getHookStatus() {
   const procs = await findSoberProcesses();
   if (procs.length === 0) return { state: 'idle', message: 'Sober not running' };
 
-  // Heartbeat from the hook's worker thread — the ONLY trustworthy signal:
-  //   ATTACHED = lua_State captured (the .so is in the actual game process)
-  //   WAITING  = .so loaded somewhere, but the Luau VM hasn't been captured yet
+  // 1) Chroot/sandbox mirrors first (most authoritative for the game proc)
+  const harvested = harvestQueueFromRoots();
+  if (harvested.status === 'ATTACHED') {
+    return { state: 'attached', message: 'Captured Luau VM — ready' };
+  }
+  if (harvested.status === 'FAILED') {
+    return { state: 'err', message: 'Hook gave up — see console' };
+  }
+  if (harvested.status === 'WAITING') {
+    return { state: 'waiting', message: 'Hook loaded — waiting for Luau VM' };
+  }
+
+  // 2) Plain ~/.nebula heartbeat (sandbox processes with a real HOME)
   try {
     const status = fs.readFileSync(path.join(QUEUE_DIR, 'status'), 'utf8').trim();
     if (status === 'ATTACHED') {
       return { state: 'attached', message: 'Captured Luau VM — ready' };
+    }
+    if (status === 'FAILED') {
+      return { state: 'err', message: 'Hook gave up — see console' };
     }
     if (status === 'WAITING') {
       return { state: 'waiting', message: 'Hook loaded — waiting for Luau VM' };
     }
   } catch {}
 
-  // No heartbeat yet. If the maps show the .so loaded it may be in the
-  // launcher process only (its stub re-execs and drops LD_PRELOAD), so don't
-  // report a false "attached" — report it as a warm-up phase instead.
+  // 3) No heartbeat yet. If the maps show the .so loaded it may be in the
+  // launcher process only — report it as a warm-up phase, not attached.
   for (const proc of procs) {
     if (procHasHook(proc.pid)) {
       return { state: 'waiting', message: 'Hook .so mapped — waiting for VM capture' };
@@ -508,8 +583,10 @@ async function getHookStatus() {
   return { state: 'waiting', message: 'Sober running, hook not yet loaded' };
 }
 
-// Tail the hook's own log file (~/.nebula/queue/log) into the console.
+// Tail the hook's own log file(s): ~/.nebula/queue/log plus the /tmp/.nebula
+// mirrors found inside every running Sober process root.
 let lastLogPos = 0;
+let rootLogMarks = new Map(); // path -> last size
 setInterval(() => {
   try {
     const data = fs.readFileSync(LOG_FILE, 'utf8');
@@ -523,6 +600,29 @@ setInterval(() => {
       }
     } else {
       lastLogPos = 0; // log was rotated/truncated
+    }
+  } catch {}
+
+  // Mirrors inside sandbox/chroot roots
+  try {
+    for (const proc of findSoberProcessesSync()) {
+      const logPath = `/proc/${proc.pid}/root/tmp/.nebula/queue/log`;
+      let data;
+      try {
+        data = fs.readFileSync(logPath, 'utf8');
+      } catch { continue; }
+      const last = rootLogMarks.get(logPath) || 0;
+      if (data.length >= last) {
+        const chunk = data.slice(last);
+        rootLogMarks.set(logPath, data.length);
+        if (chunk.trim()) {
+          for (const line of chunk.split('\n')) {
+            if (line.trim()) sendProgress('hooklog', line);
+          }
+        }
+      } else {
+        rootLogMarks.set(logPath, 0);
+      }
     }
   } catch {}
 }, 700);

@@ -422,9 +422,16 @@ unsafe impl Sync for HookState {}
 
 impl HookState {
     fn queue(&self) -> &ScriptQueue {
+        // Mirror queue paths into several candidate roots. Inside Sober's
+        // sandbox/chroot the HOME env may be scrubbed or repointed, so we
+        // fall back to /tmp — which is exactly where the GUI's seeder copies
+        // the hook .so, making the two sides agree without any env contract.
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         let paths = nebula_core::NebulaPaths::root(PathBuf::from(home).join(".nebula"));
         let _ = paths.ensure();
+        // Best-effort mirror into /tmp/.nebula as well (chroot-visible).
+        let mirror = nebula_core::NebulaPaths::root(PathBuf::from("/tmp/.nebula"));
+        let _ = mirror.ensure();
         self.queue.get_or_init(|| ScriptQueue::new(&paths))
     }
 }

@@ -86,11 +86,26 @@ impl ScriptQueue {
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&self.log) {
             let _ = writeln!(f, "{line}");
         }
+        // Mirror into /tmp/.nebula — inside Sober's chroot $HOME may be
+        // unset or repointed, and /tmp is the path the GUI's seeder writes
+        // to, so this mirror keeps both sides discoverable.
+        let mirror = PathBuf::from("/tmp/.nebula/queue/log");
+        if let Some(dir) = mirror.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&mirror) {
+            let _ = writeln!(f, "{line}");
+        }
     }
 
     /// Hook side: write the status heartbeat.
     pub fn hook_set_status(&self, status: &str) {
         let _ = fs::write(&self.status, status);
+        let mirror = PathBuf::from("/tmp/.nebula/queue/status");
+        if let Some(dir) = mirror.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let _ = fs::write(&mirror, status);
     }
 
     /// Test helper: does the exec file exist?
