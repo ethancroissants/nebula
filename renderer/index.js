@@ -130,6 +130,13 @@ window.nebula.onProgress(({ phase, message }) => {
     log(`[hook] ${message}`);
     return;
   }
+  if (phase === 'log') {
+    log(message);
+    return;
+  }
+  if (phase === 'ok' || phase === 'err' || phase === 'warn') {
+    log(message, phase);
+  }
   setStage(message, phase === 'error' ? 'err' : phase === 'injected' || phase === 'installed' ? 'ok' : phase === 'timeout' ? 'warn' : '');
   switch (phase) {
     case 'preparing':

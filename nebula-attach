@@ -35,6 +35,12 @@ echo "[nebula] granting sandbox access to $QUEUE_DIR (rw)"
 mkdir -p "$QUEUE_DIR"
 flatpak override --user --filesystem="$QUEUE_DIR:rw" "$APP_ID"
 
+# The sandbox blocks $HOME entirely — without a hole for the lib's directory,
+# LD_PRELOAD points at an unreadable file and the loader silently skips it.
+LIB_DIR="$(dirname "$HOOK_SO")"
+echo "[nebula] granting sandbox access to $LIB_DIR (ro)"
+flatpak override --user --filesystem="$LIB_DIR:ro" "$APP_ID"
+
 echo "[nebula] setting LD_PRELOAD=$HOOK_SO"
 flatpak override --user --env=LD_PRELOAD="$HOOK_SO" "$APP_ID"
 

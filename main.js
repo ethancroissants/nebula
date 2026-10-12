@@ -93,6 +93,10 @@ function sendProgress(phase, message) {
   }
 }
 
+function log(message, kind = '') {
+  sendProgress(kind === '' ? 'log' : kind, message);
+}
+
 function findHookLib() {
   for (const candidate of HOOK_CANDIDATES) {
     try { if (fs.existsSync(candidate)) return candidate; } catch {}
@@ -154,9 +158,17 @@ async function applyOverride(hookLib) {
   await run(`flatpak override --user --reset ${APP_ID}`, 15000);
   fs.mkdirSync(QUEUE_DIR, { recursive: true });
   const fsRes = await run(`flatpak override --user --filesystem="${QUEUE_DIR}:rw" ${APP_ID}`, 15000);
+
+  // CRITICAL: the sandbox blocks $HOME entirely (Sober's manifest has no
+  // filesystem permissions). LD_PRELOAD pointing into $HOME is silently
+  // ignored by the loader if the file can't be read — which is exactly the
+  // "stuck waiting for hook" bug. Grant the lib's directory read-only.
+  const libDir = path.dirname(hookLib);
+  const libRes = await run(`flatpak override --user --filesystem="${libDir}:ro" ${APP_ID}`, 15000);
+
   const envRes = await run(`flatpak override --user --env=LD_PRELOAD="${hookLib}" ${APP_ID}`, 15000);
 
-  if (fsRes.ok && envRes.ok) {
+  if (fsRes.ok && envRes.ok && libRes.ok) {
     // Verify the override actually stuck before launching.
     const show = await run(`flatpak override --user --show ${APP_ID}`, 15000);
     if (show.ok && show.stdout.includes('LD_PRELOAD') && show.stdout.includes('libnebula_hook')) {
@@ -172,7 +184,10 @@ async function applyOverride(hookLib) {
     if (res.ok) return { ok: true };
     return { ok: false, error: res.stderr || res.stdout || 'nebula-attach failed' };
   }
-  return { ok: false, error: fsRes.stderr || envRes.stderr || 'flatpak override failed' };
+  return {
+    ok: false,
+    error: [fsRes, libRes, envRes].map((r) => r.stderr).filter(Boolean).join('; ') || 'flatpak override failed',
+  };
 }
 
 // ------------------------------------------------------------------- IPC ----
@@ -315,6 +330,7 @@ ipcMain.handle('nebula:launchAndInject', async () => {
     const override = await applyOverride(hookLib);
     if (!override.ok) {
       sendProgress('error', 'Override failed — see console.');
+      log(`Override error details: ${override.error}`, 'err');
       return { ok: false, error: override.error || 'override failed' };
     }
 
