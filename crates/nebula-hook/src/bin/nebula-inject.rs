@@ -94,6 +94,61 @@ fn read_flag() -> String {
     "(none)".into()
 }
 
+/// Try each pid in turn; success on the first that accepts the hook.
+///
+/// Returns the exit code plus a flag saying whether *every* attempt was
+/// refused with EPERM (i.e. Yama is the only thing in the way).
+fn inject_into(pids: &[i32], lib: &str) -> (ExitCode, bool) {
+    let mut saw_eperm = false;
+    let mut saw_other = false;
+    for pid in pids {
+        println!("[nebula-inject] attempting pid {pid}…");
+        match remote::inject_dlopen(*pid, lib) {
+            Ok(true) => {
+                println!("[nebula-inject] injected into pid {pid} - hook .so loaded");
+                return (ExitCode::SUCCESS, false);
+            }
+            Ok(false) => {
+                eprintln!("[nebula-inject] pid {pid}: dlopen returned NULL (loader rejected the .so)");
+                saw_other = true;
+            }
+            Err(e) => {
+                eprintln!("[nebula-inject] pid {pid}: {e}");
+                if e.contains("EPERM") {
+                    saw_eperm = true;
+                } else {
+                    saw_other = true;
+                }
+            }
+        }
+    }
+    (ExitCode::from(1), saw_eperm && !saw_other)
+}
+
+/// Current value of kernel.yama.ptrace_scope, if Yama is present.
+fn yama_scope() -> Option<u32> {
+    std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Temporarily set kernel.yama.ptrace_scope. This is the one step where
+/// elevating is correct: it changes a kernel policy, it does not trace.
+fn set_yama_scope(value: u32) -> bool {
+    Command::new("sudo")
+        .arg("-n")
+        .arg("sh")
+        .arg("-c")
+        .arg(format!("echo {value} > /proc/sys/kernel/yama/ptrace_scope"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = env::args().skip(1).collect();
     if argv.first().map(|s| s == "--spawn").unwrap_or(false) {
@@ -133,56 +188,48 @@ fn main() -> ExitCode {
         eprintln!("[nebula-inject] no running sober process found");
         return ExitCode::from(1);
     }
-    let mut denied = false;
-    for pid in &pids {
-        println!("[nebula-inject] attempting pid {pid}…");
-        match remote::inject_dlopen(*pid, &lib) {
-            Ok(true) => {
-                println!("[nebula-inject] injected into pid {pid} — hook .so loaded");
-                return ExitCode::SUCCESS;
-            }
-            Ok(false) => {
-                eprintln!("[nebula-inject] pid {pid}: dlopen returned NULL (loader rejected the .so)");
-            }
-            Err(e) => {
-                eprintln!("[nebula-inject] pid {pid}: {e}");
-                if e.contains("EPERM") {
-                    denied = true;
-                }
-            }
-        }
+    // First pass as-is. If every pid is refused with EPERM, relax Yama and
+    // try again (see below).
+    let (code, denied) = inject_into(&pids, &lib);
+    if code == ExitCode::SUCCESS {
+        return ExitCode::SUCCESS;
     }
 
-    // Every attempt was refused by Yama's ptrace_scope. Root bypasses it
-    // (CAP_SYS_PTRACE), so re-run ourselves elevated exactly once — the
-    // tracee is left untouched by the failed attempts, so this is safe.
-    if denied && !env::var("NEBULA_INJECT_ELEVATED").is_ok() {
-        let exe = match env::current_exe() {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("[nebula-inject] cannot locate self for elevation: {e}");
+    // Every attempt was refused by Yama's ptrace_scope.
+    //
+    // Elevation does NOT help here, and that is the subtle part: Sober runs in
+    // a user namespace created by *your own* account, so your uid owns that
+    // namespace and holds full capabilities inside it — while sudo (uid 0)
+    // does not. Root gets EPERM as well, and could not read /proc/<pid>/root
+    // to find the sandbox's libc anyway. So: relax Yama with sudo (the one
+    // step that genuinely needs root — it's a kernel policy change, not a
+    // trace), inject as ourselves, then put the knob straight back.
+    if denied {
+        let Some(previous) = yama_scope() else {
+            eprintln!("[nebula-inject] ptrace denied; /proc/sys/kernel/yama/ptrace_scope unreadable");
+            return ExitCode::from(1);
+        };
+        if previous != 0 {
+            println!(
+                "[nebula-inject] ptrace denied - relaxing yama ptrace_scope {previous} -> 0 (sudo)..."
+            );
+            if !set_yama_scope(0) {
+                eprintln!(
+                    "[nebula-inject] could not relax ptrace_scope. Run manually:\n\
+                     \x20             sudo sh -c 'echo 0 > /proc/sys/kernel/yama/ptrace_scope'\n\
+                     \x20             (and switch it back to 1 afterwards)"
+                );
                 return ExitCode::from(1);
             }
-        };
-        let mut cmd = Command::new("sudo");
-        cmd.arg("-n");
-        cmd.env("NEBULA_INJECT_ELEVATED", "1");
-        cmd.arg(&exe);
-        if let Some(p) = explicit_pid {
-            cmd.arg(p.to_string());
-        }
-        cmd.arg(&lib);
-        println!("[nebula-inject] ptrace denied — retrying with sudo (CAP_SYS_PTRACE)…");
-        match cmd.status() {
-            Ok(st) if st.success() => return ExitCode::SUCCESS,
-            Ok(_) => {
-                eprintln!(
-                    "[nebula-inject] elevated retry failed. Either allow passwordless sudo, or run:\n\
-                     \x20              sudo sh -c 'echo 0 > /proc/sys/kernel/yama/ptrace_scope'\n\
-                     \x20              (and switch it back to 1 afterwards)"
-                );
-            }
-            Err(e) => eprintln!("[nebula-inject] could not spawn sudo: {e}"),
+            let (result, _) = inject_into(&pids, &lib);
+            // Restore immediately whatever happened: this is a security
+            // setting and we only relaxed it for the duration of the call.
+            let restored = set_yama_scope(previous);
+            println!(
+                "[nebula-inject] yama ptrace_scope restored to {previous}{}",
+                if restored { "" } else { " (FAILED - restore it manually!)" }
+            );
+            return result;
         }
     }
     ExitCode::from(1)

@@ -589,9 +589,18 @@ ipcMain.handle('nebula:launchAndInject', async () => {
           sendProgress('log', 'check_security seen — seeding hook preload now');
         }
       }
+      // Liveness: `child` is the `flatpak run` launcher, which can exit while
+      // the game it spawned keeps running happily. Only declare a crash when
+      // no `sober` process is left at all.
+      let soberAlive = false;
       try {
         process.kill(child.pid, 0);
-      } catch {
+        soberAlive = true;
+      } catch {}
+      if (!soberAlive) {
+        soberAlive = findSoberProcessesSync().length > 0;
+      }
+      if (!soberAlive) {
         if (!soberDead) {
           soberDead = true;
           clearInterval(crashPoll);

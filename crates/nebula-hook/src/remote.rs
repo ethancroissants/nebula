@@ -380,8 +380,14 @@ pub fn inject_dlopen(pid: i32, lib_path: &str) -> Result<bool, String> {
         .or_else(|| target_symbol_addr(pid, "__libc_dlopen_mode"))
         .ok_or("dlopen not found in target's mapped libc")?;
 
-    // 1. stop all threads
+    // 1. stop all threads. A thread can exit between listing and attaching
+    //    (Sober churns helper threads constantly) - skip those; if the MAIN
+    //    thread is the one that vanished, this pid is simply gone.
     let tids = stop_all_threads(pid)?;
+    if !tids.contains(&pid) {
+        detach_all(&tids);
+        return Err("target exited while attaching".into());
+    }
 
     let inner = (|| -> Result<bool, String> {
         let victim = pid; // main thread does the work
@@ -492,9 +498,15 @@ pub fn inject_dlopen(pid: i32, lib_path: &str) -> Result<bool, String> {
 
 /// Find running Sober game processes (main `sober` threads; skips `bwrap`
 /// helpers, which live in a different mount namespace and reject writes).
-/// Returns deduped main pids (TID == PID), newest first.
+///
+/// Ordered best-first: the processes whose memory maps carry the Roblox
+/// loader are the ones actually hosting the Luau VM, so injecting there is
+/// what matters. The remaining `sober` processes are UI/service helpers and
+/// are tried last. Returns deduped main pids (TID == PID), newest first
+/// within each group.
 pub fn find_sober_pids() -> Vec<i32> {
-    let mut out = Vec::new();
+    let mut vm_hosts = Vec::new();
+    let mut others = Vec::new();
     if let Ok(entries) = fs::read_dir("/proc") {
         for e in entries.flatten() {
             let Ok(p) = e.file_name().to_string_lossy().parse::<i32>() else { continue };
@@ -509,13 +521,21 @@ pub fn find_sober_pids() -> Vec<i32> {
             if !std::path::Path::new(&format!("/proc/{p}/task/{p}")).exists() {
                 continue;
             }
-            out.push(p);
+            let maps = fs::read_to_string(format!("/proc/{p}/maps")).unwrap_or_default();
+            if maps.contains("libloader") || maps.contains("libbadcpu") {
+                vm_hosts.push(p);
+            } else {
+                others.push(p);
+            }
         }
     }
-    out.sort_unstable();
-    out.dedup();
-    out.reverse(); // newest first — most likely the game process
-    out
+    for v in [&mut vm_hosts, &mut others] {
+        v.sort_unstable();
+        v.dedup();
+        v.reverse(); // newest first
+    }
+    vm_hosts.extend(others);
+    vm_hosts
 }
 
 /// Inject the hook into every running Sober process until one succeeds.
