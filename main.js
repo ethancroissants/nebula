@@ -12,16 +12,34 @@ const NEBULA_ROOT = path.join(os.homedir(), '.nebula');
 const QUEUE_DIR = path.join(NEBULA_ROOT, 'queue');
 const LOG_FILE = path.join(QUEUE_DIR, 'log');
 const PREFS_FILE = path.join(NEBULA_ROOT, 'prefs.json');
-const HOOK_LIB = path.join(NEBULA_ROOT, 'lib', 'libnebula_hook.so');
+const APP_ID = 'org.vinegarhq.Sober';
+
+// Where the hook library might live, in priority order
+const HOOK_CANDIDATES = [
+  path.join(NEBULA_ROOT, 'lib', 'libnebula_hook.so'),
+  path.join(os.homedir(), '.local', 'lib', 'nebula', 'libnebula_hook.so'),
+  '/usr/lib/nebula/libnebula_hook.so',
+  '/usr/local/lib/nebula/libnebula_hook.so',
+  path.join(__dirname, 'libnebula_hook.so'),
+  path.join(__dirname, 'target', 'release', 'libnebula_hook.so'),
+];
+
+// Where the legacy attach helper might live (used only as a fallback)
+const ATTACH_CANDIDATES = [
+  path.join(os.homedir(), '.local', 'bin', 'nebula-attach'),
+  '/usr/local/bin/nebula-attach',
+  '/usr/bin/nebula-attach',
+  path.join(__dirname, 'nebula-attach'),
+];
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1100,
-    height: 760,
-    minWidth: 800,
+    width: 1140,
+    height: 780,
+    minWidth: 860,
     minHeight: 600,
-    title: 'Nebula â for Sober',
-    backgroundColor: '#0b0d12',
+    title: 'Nebula — for Sober',
+    backgroundColor: '#07080d',
     titleBarStyle: 'hiddenInset',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -37,6 +55,8 @@ function createWindow() {
     shell.openExternal(url);
     return { action: 'deny' };
   });
+
+  mainWindow.on('closed', () => { mainWindow = null; });
 }
 
 // ---------------------------------------------------------------- helpers ---
@@ -47,12 +67,102 @@ function ensureDirs() {
   }
 }
 
-function run(cmd) {
+function run(cmd, timeoutMs = 30000) {
   return new Promise((resolve) => {
-    exec(cmd, (err, stdout, stderr) => {
-      resolve({ ok: !err, stdout: stdout.trim(), stderr: stderr.trim() });
+    exec(cmd, { timeout: timeoutMs }, (err, stdout, stderr) => {
+      resolve({ ok: !err, stdout: (stdout || '').trim(), stderr: (stderr || '').trim() });
     });
   });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function sendProgress(phase, message) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('nebula:progress', { phase, message });
+  }
+}
+
+function findHookLib() {
+  for (const candidate of HOOK_CANDIDATES) {
+    try { if (fs.existsSync(candidate)) return candidate; } catch {}
+  }
+  return null;
+}
+
+function findAttachScript() {
+  for (const candidate of ATTACH_CANDIDATES) {
+    try { if (fs.existsSync(candidate)) return candidate; } catch {}
+  }
+  return null;
+}
+
+function loadPrefs() {
+  try {
+    return JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8'));
+  } catch {
+    return { autoAttach: true, fontSize: 13 };
+  }
+}
+
+async function findSoberProcesses() {
+  // Match the flatpak app id, the `sober` binary name and the game process,
+  // but never our own grep (ps lists it while running under some shells).
+  const res = await run(
+    "ps -eo pid,comm,args | grep -Ei 'sober' | grep -Ev 'grep|nebula' || true"
+  );
+  if (!res.ok || !res.stdout) return [];
+  return res.stdout
+    .split('\n')
+    .map((line) => {
+      const [pid, ...rest] = line.trim().split(/\s+/);
+      return { pid: parseInt(pid, 10), cmd: rest.join(' ') };
+    })
+    .filter((p) => !isNaN(p.pid) && p.pid > 0);
+}
+
+// Read /proc/<pid>/maps directly — far more reliable than shelling out to grep.
+function procHasHook(pid) {
+  try {
+    const maps = fs.readFileSync(`/proc/${pid}/maps`, 'utf8');
+    return maps.includes('libnebula_hook');
+  } catch {
+    return false;
+  }
+}
+
+async function anyProcHasHook() {
+  const procs = await findSoberProcesses();
+  for (const proc of procs) {
+    if (procHasHook(proc.pid)) return true;
+  }
+  return false;
+}
+
+// Apply the flatpak override ourselves (no external script, no PATH issues).
+async function applyOverride(hookLib) {
+  await run(`flatpak override --user --reset ${APP_ID}`, 15000);
+  fs.mkdirSync(QUEUE_DIR, { recursive: true });
+  const fsRes = await run(`flatpak override --user --filesystem="${QUEUE_DIR}:rw" ${APP_ID}`, 15000);
+  const envRes = await run(`flatpak override --user --env=LD_PRELOAD="${hookLib}" ${APP_ID}`, 15000);
+
+  if (fsRes.ok && envRes.ok) {
+    // Verify the override actually stuck before launching.
+    const show = await run(`flatpak override --user --show ${APP_ID}`, 15000);
+    if (show.ok && show.stdout.includes('LD_PRELOAD') && show.stdout.includes('libnebula_hook')) {
+      return { ok: true };
+    }
+    return { ok: false, error: 'Override verification failed: ' + (show.stdout || show.stderr) };
+  }
+
+  // Fallback: legacy attach helper script
+  const script = findAttachScript();
+  if (script) {
+    const res = await run(`"${script}" "${hookLib}"`, 30000);
+    if (res.ok) return { ok: true };
+    return { ok: false, error: res.stderr || res.stdout || 'nebula-attach failed' };
+  }
+  return { ok: false, error: fsRes.stderr || envRes.stderr || 'flatpak override failed' };
 }
 
 // ------------------------------------------------------------------- IPC ----
@@ -63,7 +173,14 @@ ipcMain.handle('nebula:getState', async () => {
   const procs = await findSoberProcesses();
   const override = await getOverride();
   const hookStatus = await getHookStatus();
-  return { prefs, procs, override, hookStatus, paths: { root: NEBULA_ROOT, queue: QUEUE_DIR, log: LOG_FILE } };
+  const hookLib = findHookLib();  return {
+    prefs,
+    procs,
+    override,
+    hookStatus,
+    hookLib,
+    paths: { root: NEBULA_ROOT, queue: QUEUE_DIR, log: LOG_FILE },
+  };
 });
 
 ipcMain.handle('nebula:savePrefs', async (_e, prefs) => {
@@ -87,71 +204,168 @@ ipcMain.handle('nebula:readLog', async () => {
   }
 });
 
+// Legacy single-purpose handlers (kept for compatibility / scripting)
 ipcMain.handle('nebula:attach', async () => {
-  const res = await run('nebula-attach');
-  return res;
+  const hookLib = findHookLib();
+  if (!hookLib) return { ok: false, stderr: 'libnebula_hook.so not found' };
+  return applyOverride(hookLib);
 });
 
 ipcMain.handle('nebula:launchSober', async () => {
-  const res = await run('flatpak run org.vinegarhq.Sober');
-  return res;
+  const child = spawn('flatpak', ['run', APP_ID], { detached: true, stdio: 'ignore' });
+  child.unref();
+  return { ok: true };
+});
+
+ipcMain.handle('nebula:stopSober', async () => {
+  await run('pkill -f "org.vinegarhq.Sober" || true', 10000);
+  await run('pkill -x sober || true', 10000);
+  await sleep(500);
+  return { ok: true };
 });
 
 ipcMain.handle('nebula:checkSober', async () => {
-  const res = await run('flatpak info org.vinegarhq.Sober');
+  const res = await run(`flatpak info ${APP_ID}`, 15000);
   return res.ok;
 });
 
+ipcMain.handle('nebula:openFile', async () => {
+  const { dialog } = require('electron');
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Open script',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Luau / Lua', extensions: ['lua', 'luau'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  });
+  if (res.canceled || res.filePaths.length === 0) return null;
+  try {
+    return fs.readFileSync(res.filePaths[0], 'utf8');
+  } catch (err) {
+    return null;
+  }
+});
+
+ipcMain.handle('nebula:saveFile', async (_e, content) => {
+  const { dialog } = require('electron');
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  const res = await dialog.showSaveDialog(win, {
+    title: 'Save script',
+    defaultPath: path.join(os.homedir(), 'script.lua'),
+    filters: [{ name: 'Luau / Lua', extensions: ['lua', 'luau'] }],
+  });
+  if (res.canceled || !res.filePath) return null;
+  try {
+    fs.writeFileSync(res.filePath, content);
+    return true;
+  } catch {
+    return false;
+  }
+});
+
 ipcMain.handle('nebula:installSober', async () => {
-  const res = await run('flatpak install -y flathub org.vinegarhq.Sober');
+  sendProgress('installing', 'Installing Sober from Flathub…');
+  const res = await run(`flatpak install -y flathub ${APP_ID}`, 600000);
+  sendProgress('idle', res.ok ? 'Sober installed.' : 'Install failed.');
   return res;
+});
+
+// The one button that does everything, in the right order, with live progress:
+//   stop stale Sober → apply override → launch detached → wait for the hook
+//   to show up in the process' memory maps → report success.
+ipcMain.handle('nebula:launchAndInject', async () => {
+  try {
+    ensureDirs();
+    const prefs = loadPrefs();
+
+    const hookLib = findHookLib();
+    if (!hookLib) {
+      sendProgress('error', 'Hook library not found — reinstall Nebula.');
+      return { ok: false, error: 'libnebula_hook.so not found' };
+    }
+
+    // 1. A clean slate: LD_PRELOAD only applies at process start, so any
+    //    already-running Sober would launch *without* the hook.
+    let procs = await findSoberProcesses();
+    if (procs.length > 0 && prefs.autoAttach !== false) {
+      sendProgress('preparing', 'Stopping existing Sober…');
+      await run('pkill -f "org.vinegarhq.Sober" || true', 10000);
+      await run('pkill -x sober || true', 10000);
+      await sleep(1500);
+      procs = await findSoberProcesses();
+      if (procs.length > 0) {
+        await run('pkill -9 -f "org.vinegarhq.Sober" || true', 10000);
+        await sleep(800);
+      }
+    }
+
+    // 2. Apply + verify the sandbox override
+    sendProgress('preparing', 'Applying sandbox override…');
+    const override = await applyOverride(hookLib);
+    if (!override.ok) {
+      sendProgress('error', 'Override failed — see console.');
+      return { ok: false, error: override.error || 'override failed' };
+    }
+
+    // 3. Launch Sober detached (never block on it — this was the old hang)
+    sendProgress('launching', 'Launching Sober…');
+    const child = spawn('flatpak', ['run', APP_ID], { detached: true, stdio: 'ignore' });
+    child.unref();
+
+    // 4. Poll for the hook inside the game process (map of wait phase → dot)
+    sendProgress('waiting', 'Waiting for Sober to start…');
+    const started = Date.now();
+    const deadline = started + 120000;
+    let lastNotice = 0;
+    while (Date.now() < deadline) {
+      await sleep(700);
+      const elapsed = Math.round((Date.now() - started) / 1000);
+      procs = await findSoberProcesses();
+      if (procs.length === 0) continue;
+      if (procs.some((p) => procHasHook(p.pid))) {
+        sendProgress('injected', 'Injected — ready to execute.');
+        return { ok: true, injected: true };
+      }
+      if (Date.now() - lastNotice > 5000) {
+        lastNotice = Date.now();
+        sendProgress('waiting', `Sober running — waiting for hook… (${elapsed}s)`);
+      }
+    }
+
+    sendProgress('timeout', 'Sober launched, but hook not detected yet.');
+    return { ok: true, injected: false, error: 'hook not detected within timeout' };
+  } catch (err) {
+    sendProgress('error', `Launch failed: ${err}`);
+    return { ok: false, error: String(err) };
+  }
 });
 
 // ------------------------------------------------------------------ boot ---
 
-function loadPrefs() {
-  try {
-    return JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8'));
-  } catch {
-    return { autoAttach: true, fontSize: 13.5 };
-  }
-}
-
-async function findSoberProcesses() {
-  const res = await run("ps -eo pid,comm,args | grep -i sober | grep -v grep");
-  if (!res.ok || !res.stdout) return [];
-  return res.stdout.split('\n').map((line) => {
-    const [pid, ...rest] = line.trim().split(/\s+/);
-    return { pid: parseInt(pid, 10), cmd: rest.join(' ') };
-  }).filter((p) => !isNaN(p.pid));
-}
-
 async function getOverride() {
-  const res = await run('flatpak override --show org.vinegarhq.Sober');
+  const res = await run(`flatpak override --user --show ${APP_ID}`, 15000);
   return res.ok ? res.stdout : '';
 }
 
 async function getHookStatus() {
-  // Check if the hook is actually loaded in any Sober process
   const procs = await findSoberProcesses();
   if (procs.length === 0) return { state: 'idle', message: 'Sober not running' };
-  
-  // Check if any Sober process has our hook loaded
+
   for (const proc of procs) {
-    const res = await run(`grep -l "libnebula_hook" /proc/${proc.pid}/maps 2>/dev/null || true`);
-    if (res.ok && res.stdout) {
-      return { state: 'attached', message: 'Hook loaded' };
+    if (procHasHook(proc.pid)) {
+      return { state: 'attached', message: `Hook loaded (pid ${proc.pid})` };
     }
   }
-  
-  // Check if the queue status file indicates attachment
+
   try {
     const status = fs.readFileSync(path.join(QUEUE_DIR, 'status'), 'utf8').trim();
     if (status === 'ATTACHED') {
       return { state: 'attached', message: 'Hook reported attached' };
     }
   } catch {}
-  
+
   return { state: 'waiting', message: 'Sober running, hook not yet loaded' };
 }
 
