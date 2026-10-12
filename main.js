@@ -13,14 +13,22 @@ const QUEUE_DIR = path.join(NEBULA_ROOT, 'queue');
 const LOG_FILE = path.join(QUEUE_DIR, 'log');
 const PREFS_FILE = path.join(NEBULA_ROOT, 'prefs.json');
 const APP_ID = 'org.vinegarhq.Sober';
+// Silence Chromium's security-warning spam in the terminal (the fontconfig /
+// libva noise comes from the OS libs themselves and is harmless).
+process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true';
+// Silence noisy fontconfig/va warnings that leak into the terminal on some distros.
+process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true';
 
 // Where the hook library might live, in priority order
 const HOOK_CANDIDATES = [
   path.join(NEBULA_ROOT, 'lib', 'libnebula_hook.so'),
   path.join(os.homedir(), '.local', 'lib', 'nebula', 'libnebula_hook.so'),
+  path.join(os.homedir(), '.local', 'lib', 'nebula', 'hook', 'libnebula_hook.so'),
   '/usr/lib/nebula/libnebula_hook.so',
   '/usr/local/lib/nebula/libnebula_hook.so',
   path.join(__dirname, 'libnebula_hook.so'),
+  path.join(__dirname, 'hook', 'libnebula_hook.so'),
+  path.join(__dirname, '..', 'hook', 'libnebula_hook.so'),
   path.join(__dirname, 'target', 'release', 'libnebula_hook.so'),
 ];
 
@@ -30,6 +38,8 @@ const ATTACH_CANDIDATES = [
   '/usr/local/bin/nebula-attach',
   '/usr/bin/nebula-attach',
   path.join(__dirname, 'nebula-attach'),
+  path.join(__dirname, 'hook', 'nebula-attach'),
+  path.join(__dirname, '..', 'hook', 'nebula-attach'),
 ];
 
 function createWindow() {

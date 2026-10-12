@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. v0.4.2)'
+        required: true
+        default: ''
 
 # The default GITHUB_TOKEN needs explicit write access to create a release
 # and upload the tarball as an asset.
@@ -14,7 +20,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -60,6 +69,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
+          # workflow_dispatch carries no tag ref — fall back to the input
+          # (the checkout step pins the tag via ref: below).
+          if [ "$TAG" = "refs/heads" ] || [ -z "$TAG" ] || [ "$TAG" = "$GITHUB_REF" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          fi
+          [ -n "$TAG" ] || { echo "::error::No tag specified"; exit 1; }
+          echo "Releasing tag: $TAG"
           echo "Creating release for tag $TAG"
 
           RELEASE_ID=$(curl -s -X POST \
