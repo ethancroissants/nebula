@@ -783,6 +783,7 @@ ipcMain.handle('nebula:launchAndInject', async () => {
     let diagDone = false;
     let lastInject = 0;
     let runtimeSeedDone = false;
+    let earlyDiagDone = false;
     while (Date.now() < deadline) {
       await sleep(700);
       const elapsed = Math.round((Date.now() - started) / 1000);
@@ -808,6 +809,29 @@ ipcMain.handle('nebula:launchAndInject', async () => {
       //      process the sandbox starts from here on (the game exec).
       //   2. Per-process root seeding — belt & suspenders for anything
       //      that already started or runs in a private chroot.
+      // EARLY diagnostic. The old one-shot diag ran at elapsed>=8s, by which
+      // time the per-process seeding below had already rewritten
+      // /etc/ld.so.preload to /tmp/libnebula_hook.so. So it always reported
+      // our own late write and could never show what the loader actually saw
+      // at exec. This runs before check_security (~7s) so the launch-time
+      // state is still observable, and it also checks whether the path we
+      // seeded is even visible inside the sandbox root.
+      if (!earlyDiagDone && elapsed >= 2) {
+        earlyDiagDone = true;
+        for (const p of findSoberProcessesSync()) {
+          let pre;
+          try {
+            pre = fs.readFileSync(`/proc/${p.pid}/root/etc/ld.so.preload`, 'utf8').trim() || '(empty)';
+          } catch (e) {
+            pre = `(unreadable ${e.code})`;
+          }
+          // Does the seeded hook path resolve from inside this sandbox root?
+          const visible = fs.existsSync(`/proc/${p.pid}/root${hookLib}`);
+          sendProgress('log',
+            `[launch] pid ${p.pid} preload=${pre} | hookVisible=${visible} | ${hookLib}`);
+        }
+      }
+
       if (seedingEnabled && checkSecurityPassed && !runtimeSeedDone) {
         runtimeSeedDone = true;
         sendProgress('preparing', 'check_security passed — seeding runtime preload…');
