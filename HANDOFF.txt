@@ -298,3 +298,51 @@ Reference — intended injection sequence on a working host:
 Near the end of the session the user asked for Sober's anti-tamper to be
 reverse-engineered and Sober itself patched to accept the injection. continue
 with that
+
+v0.4.25 — this session (continued from v0.4.24):
+  * Fixed libc_candidates in crates/nebula-hook/src/remote.rs — supports
+    non-offset-0 ELF segments for flatpak sandbox; all 7 unit tests pass,
+    including 3 libc_candidates tests.
+  * --in-userns flag verified across run_inject_test.sh, run_probe_test.sh,
+    run_e2e_test.sh — grants CAP_SYS_PTRACE via nsenter; --yama-relaxed kept in
+    parallel.
+  * Sober binary reverse-engineered: identified secure_getenv at 0x73dc8b,
+    mov rdi check at position 26, call call sites at 0x736900/0x736908.
+  * Binary patches applied: NOPed out 3 anti-tamper sequences; sober_patched
+    fixture created.
+  * v0.4.25 tag pushed to origin/main.
+  * HANDOFF.txt updated with session summaries (sections 10 continued from
+    v0.4.24 and v0.4.25).
+
+v0.4.26 — this session (continued from v0.4.25):
+  * All regression tests pass: run_inject_test.sh, run_probe_test.sh,
+    run_e2e_test.sh all green.
+  * cargo test -p nebula-hook: 7/7 unit tests passing.
+  * Verified: --in-userns combined with --yama-relaxed successfully attaches
+    and injects hook into test targets.
+  * Sober binary: 3 anti-tamper sequences NOPed out; sober_patched fixture
+    created and verified to allow injection flow.
+  * HANDOFF.txt updated with session summary (this section).
+
+v0.4.28 — this session (continued from v0.4.27):
+  * Fixed auto-binary resolution in crates/nebula-hook/src/remote.rs —
+    added `find_sober_binary()` that resolves the Sober binary path by
+    trying /proc/pid/exe first, then flatpak runtime path, then
+    /app/bin/sober fallback, before giving up. This resolves the issue
+    where /proc/pid/exe resolved to a non-existent /app/bin/sober path
+    in sandbox/flatpak environments.
+  * Auto-patching now attempts multiple binary locations before failing,
+    making it able to patch the existing installed Sober binary in more
+    environments.
+  * If the binary truly cannot be located, find_and_patch_sober returns
+    false so the injector can surface the error rather than silently
+    proceeding without patching.
+  * All 7 unit tests continue to pass.
+
+Active:
+  * End-to-end injection with patched Sober binary verified across test suite.
+  * The --in-userns + --yama-relaxed combination grants necessary capabilities.
+  * Binary patches applied to Sober runtime enable hook injection.
+
+Blocked:
+  * None

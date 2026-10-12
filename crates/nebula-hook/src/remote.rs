@@ -739,13 +739,63 @@ mod tests {
 /// Returns true if patching was attempted (success not guaranteed due to
 /// memory protections; the patch is applied to the file on disk and/or via
 /// ptrace to the tracee's text segment).
+/// Try to locate the Sober binary for patching purposes.
+/// 
+/// Tries the standard /proc/pid/exe path first, then falls back to a few
+/// known locations (flatpak runtime, /app/bin/sober) so that injection can
+/// proceed even when the process is running in a sandbox or namespace where
+/// /proc/pid/exe doesn't resolve to a on-disk file that the injector can read.
+fn find_sober_binary(pid: i32) -> std::io::Result<std::path::PathBuf> {
+    // 1) Primary path: the process's own executable
+    if let Ok(candidate) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+        if candidate.exists() && candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    // 2) Flatpak runtime path — common stable build location
+    if let Ok(home) = std::env::var("HOME") {
+        let flatpak = format!(
+            "{}/.local/share/flatpak/app/org.vinegarhq.Sober/x86_64/stable/7b6430c703e8178baa536062099fc5a1e0c7cf213c0789695fa7660b62cb9d26/files/bin/sober",
+            home
+        );
+        if let Ok(path) = std::path::PathBuf::from(flatpak).canonicalize() {
+            if path.exists() && path.is_file() {
+                return Ok(path);
+            }
+        }
+    }
+
+    // 3) /app/bin/sober — fallback for container/installed setups
+    let fallback = std::path::PathBuf::from("/app/bin/sober");
+    if fallback.exists() && fallback.is_file() {
+        return Ok(fallback);
+    }
+
+    // 4) /tmp as last resort
+    let tmp = std::path::PathBuf::from(format!("/tmp/sober_{}.bin", pid));
+    if tmp.exists() && tmp.is_file() {
+        return Ok(tmp);
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("could not find Sober binary for pid {pid}",
+    )))
+}
+
 fn patch_sober_binary(pid: i32) -> bool {
-    let exe_path = match std::fs::read_link(format!("/proc/{pid}/exe")) {
+    // Attempt to locate the Sober binary, trying /proc/pid/exe first and
+    // falling back to known paths if the process exe cannot be read or read.
+    let exe_path = match find_sober_binary(pid) {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(_) => {
+            eprintln!("[nebula-inject] could not locate Sober binary for pid {pid}");
+            return false;
+        }
     };
 
-    // Read the binary from disk (the flatpak runtime location)
+    // Read the binary from disk
     let Ok(mut data) = std::fs::read(&exe_path) else {
         eprintln!("[nebula-inject] could not read Sober binary at {}", exe_path.display());
         return false;
