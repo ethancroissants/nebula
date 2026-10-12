@@ -1,0 +1,300 @@
+================================================================================
+NEBULA — SESSION HANDOFF
+Repo: https://github.com/ethancroissants/nebula
+Latest published release: v0.4.23
+Working tree: clean at commit eded968
+================================================================================
+
+NOTE ON SCOPE
+-------------
+This file is a factual record of engineering work: what the tool is, what
+changed, what is verified, and what is still unknown.
+
+
+
+================================================================================
+1. WHAT THE PROJECT IS
+================================================================================
+
+Nebula is an Electron GUI + Rust shared library ("the hook"). Its purpose is
+to attach to the Luau VM inside the Sober Roblox client and execute queued
+Lua scripts in it.
+
+Components:
+  main.js                 Electron front-end: launch, seeding, injection, UI
+  preload.js              Electron preload
+  renderer/               UI
+  crates/nebula-core/     paths, script queue, log/status queue mirror
+  crates/nebula-hook/     the .so hook  + nebula-inject binary (ptrace injector)
+  install.sh              installs to ~/.local/lib/nebula/
+  tests/                  harnesses, run standalone or via CI
+
+Install layout:
+  ~/.local/lib/nebula/{Nebula, resources/app.asar,
+                        hook/{libnebula_hook.so, nebula-inject, nebula-attach}}
+  ~/.local/bin/nebula-inject  (symlink)
+
+NOTE: __dirname is inside app.asar, so path lookups that assume the injector
+sits next to main.js are wrong — it ships beside the hook .so. Use
+findInjectHelper() in main.js.
+
+
+================================================================================
+2. RELEASE CADENCE — TAGS ARE THE DELIVERY MECHANISM
+================================================================================
+
+Every fix ships as a new `v*` tag. The GitHub Actions Release workflow is
+tag-triggered, so an untagged fix never reaches Releases and the user cannot
+download it. This has bitten twice. Tag + push, always.
+
+  v0.4.15  seed gate: no ld.so.preload before Sober's check_security passes
+  v0.4.16  ptrace remote-dlopen injection + nebula-inject binary
+  v0.4.17  find the injector where it actually ships; name-independent Luau
+           discovery (soname allowlist -> RTLD_DEFAULT -> static ELF scan)
+  v0.4.18  four real injector bugs (see §4)
+  v0.4.19  Yama escalation via GUI (root re-exec was the wrong lever — §5)
+  v0.4.20  admin rights requested in a GUI dialog, never a terminal
+  v0.4.21  join Sober's user namespace; capability diagnostics
+  v0.4.22  explain symbol-lookup failures; keep both inject attempts' output
+  v0.4.23  --attach-only probe; resume threads on attach failure
+
+
+================================================================================
+3. VERIFIED TEST STATUS (all green at v0.4.23)
+================================================================================
+
+  tests/run_inject_test.sh   PASS  injector dlopen'd hook into a live process,
+                                   target survived clean detach
+  tests/run_probe_test.sh    PASS  --attach-only is a genuine no-op on the host
+  tests/run_e2e_test.sh      PASS  script executed inside the real Luau VM
+  cargo test -p nebula-hook  PASS  7 unit tests
+  node --check main.js       PASS
+
+New harnesses:
+  tests/inject_target.c      stand-in host (dlopens libc, has a live thread)
+  tests/run_probe_test.sh    probe-mode regression
+  tests/host.c, fake_host.c, fake_vm.c, luau_shim.c   E2E fixtures
+
+
+================================================================================
+4. v0.4.18 — FOUR INJECTOR BUGS (worth reading; all were subtle)
+================================================================================
+
+1. Hand-rolled `extern "C"` bindings for waitpid returned EINVAL on a valid
+   child. Replaced with the `libc` crate bindings.
+   cargo: libc = "0.2", crate-type = ["cdylib", "rlib"]
+
+2. Load base was taken from the `r-xp` mapping start. It must come from the
+   mapping whose file offset is 00000000 — the r-xp one is ~0x26000 too high.
+   Pinned by tests/run_inject_test.sh and by libc_candidates() unit tests.
+
+3. The target's ELF was read from the host path, which does not exist inside a
+   Flatpak sandbox. Must be read through /proc/<pid>/root + <path-in-sandbox>.
+
+4. No return address was placed for the hijacked frame: `ret` popped garbage
+   and jumped into the weeds. Now a TRAP_ADDR (canonical but unmapped) is
+   written to the stack; the trap gives control back with rax = the dlopen
+   handle.
+
+Also: `ld.so.preload` only, never `LD_PRELOAD` — dual paths caused a
+double-trampoline crash.
+
+
+================================================================================
+5. THE FAULT LINE THAT MATTERS MOST
+================================================================================
+
+Several rounds were spent on a wrong theory. Recording it so it is not
+re-tried.
+
+WRONG THEORY: "Yama ptrace_scope blocks attaching."
+  - Why it looked true: ptrace_scope=1 really does refuse non-ancestors.
+  - Why it was wrong: setting ptrace_scope to 0 changed NOTHING. Still EPERM.
+    The refusal is the kernel's CAP_SYS_PTRACE check, which asks whether the
+    tracer is capable IN THE TRACEE'S USER NAMESPACE. No ptrace_scope value
+    can satisfy that question.
+  - Corroborating: `sudo` (uid 0) also got EPERM, and could not even read
+    /proc/<pid>/root. Root holds no capabilities inside a namespace owned by
+    the user, so elevation moves away from the answer, not toward it.
+  - This was partly self-inflicted: the EPERM message literally said
+    "ptrace_scope blocks attaching", which pointed the investigation at Yama
+    for two rounds. Fixed in v0.4.21.
+
+WHY THE USERNAME MATTERS (v0.4.21): becoming a member of the target's user
+namespace satisfies the check. A process whose euid is 0 inside a userns
+holds every capability in it. Implemented as:
+    nsenter --user --target <pid> --setuid=0 --setgid=0 <injector> --in-userns ...
+Note nsenter has NO --map-root-user (that is unshare's spelling); --setuid/
+--setgid is the equivalent. A --preserve-credentials retry covers sandboxes
+that do not map uid 0. --in-userns guards against recursive re-exec.
+
+Because that needs no privileges, main.js tries a plain injection first and
+only escalates (with the GUI dialog) if it is genuinely refused — so a
+working machine is never prompted.
+
+
+================================================================================
+6. v0.4.22 — SYMBOL-LOOKUP DIAGNOSTICS
+================================================================================
+
+Failure moved EARLIER in inject_dlopen:
+    pid 159060: dlopen not found in target's mapped libc
+This is returned before any ptrace happens — it is the very first step.
+
+That one message hid four unrelated causes: unreadable maps; no libc mapping
+at all; an unreadable /proc/<pid>/root copy of libc; symbol genuinely absent.
+explain_symbol_lookup() now reports which occurred.
+
+maps parsing extracted to libc_candidates() and unit-tested, pinning the two
+silent failures: load base must come from the file-offset-0 segment, and
+[heap]/[stack] must never be treated as files.
+
+Also fixed a logging bug in main.js: it overwrote `res` on escalation, so the
+FIRST (plain) attempt's output was discarded. That is backwards when the two
+attempts fail differently — the plain run's EPERM is the evidence that
+triggered the escalation. Both are now shown, tagged [inject] / [inject+root].
+
+
+================================================================================
+7. CURRENT BLOCKER (v0.4.23)
+================================================================================
+
+Confirmed by the user on their machine:
+  * Sober opens fine WITHOUT the injector.
+  * Sober closes BY ITSELF when the injector runs.
+So the injector is killing the host, and "Sober exited early" never said
+which part did it.
+
+Two candidates that present IDENTICALLY from outside:
+  (a) the host treats being ptraced as hostile (TracerPid polling /
+      anti-debug) -> remote injection is impossible on that host
+  (b) the dlopen trampoline is wrong -> our bug, fixable
+
+nebula-inject --attach-only was added to separate them: attach every thread,
+detach, load NOTHING. main.js runs the probe first, then checks whether any
+sober process survived. If none did it stops and reports that the host
+terminates when ptraced, instead of firing a trampoline into a dead process.
+
+The probe has NOT yet been run against real Sober — v0.4.23 is the release
+that would produce that answer. The next log should contain either:
+  [probe] probe OK on pid ... — ptrace alone is survivable
+or
+  Sober exited as soon as it was ptraced — no code was injected.
+
+ALSO KNOWN AND UNFIXED:
+  * A separate Sober pid sometimes yields "GETREGS: No such process" — a
+    thread died between listing and attaching. Non-fatal (we move to the next
+    pid) but unexplained.
+  * On some runs only ONE sober process is still alive by injection time,
+    where three existed at startup. Worth understanding.
+
+BUG FOUND AND FIXED in v0.4.23:
+  stop_all_threads() returned early when it failed to attach to the main
+  thread, while every previously-attached thread stayed STOPPED. That freezes
+  the host permanently and is indistinguishable from a crash. It now tracks
+  what it attached to and resumes it on every failure path.
+  Honesty note: the new probe test does NOT cover this. A single-threaded
+  target cannot produce a partial attach (all threads share credentials, so
+  they succeed or fail together) and no multi-threaded fail-on-demand target
+  was buildable. Verified by reintroducing the leak and re-running: the test
+  still passed. The fix is defensive hardening.
+
+
+================================================================================
+8. v0.4.20 — GUI PRIVILEGE ESCALATION
+================================================================================
+
+Nebula needs root for exactly two things: writing the flatpak runtime's
+/etc/ld.so.preload, and relaxing kernel.yama.ptrace_scope. Neither may fall
+back to a terminal prompt — from a GUI app an invisible sudo prompt on a TTY
+nobody is watching is indistinguishable from a hang.
+
+runPrivileged(), tried in order:
+  1. `sudo -n`                    silent; works when passwordless sudo configured
+  2. `pkexec`                     hands off to the desktop's polkit agent, so the
+                                  prompt is a real dialog labelled with the app
+  3. `zenity` / `kdialog`         collect the password ourselves, feed to
+                                  `sudo -S`; cached so one launch never asks
+                                  twice
+
+Also replaced hand-rolled shell interpolation with shQuote() for every value
+reaching a privileged shell. The preload file contents were previously
+interpolated unquoted via JSON.stringify, which is not shell quoting.
+shQuote is verified to round-trip through a real /bin/sh against $(...),
+backticks, embedded quotes and a quote-breakout payload.
+
+The Yama relaxation lives in main.js (the GUI is the only process that can
+show a dialog). nebula-inject takes --yama-relaxed to stand down; run from a
+terminal it keeps its own sudo -n fallback.
+
+
+================================================================================
+9. KNOWN-GOOD HOUSEKEEPING FROM EARLIER ROUNDS
+================================================================================
+
+  * ld.so.preload is seeded only AFTER Sober's own check_security lifecycle
+    line appears. Mapping the hook at boot makes Sober exit by design.
+  * clearStalePreloads() scrubs stale Nebula entries from the flatpak runtime
+    /etc AND host /etc before every launch, including Safe Mode. A leftover
+    entry reproduces the exact "Sober sees an odd .so and exits" symptom —
+    this happened on the dev box and may recur on the user's.
+  * find_sober_pids() prefers processes whose maps contain libloader /
+    libbadcpu (the real VM hosts) over UI helper processes.
+  * The "Sober exited early" liveness check no longer trusts the `flatpak run`
+    launcher pid alone — that launcher exits while the game keeps running,
+    which produced a false crash report.
+  * Benign log noise: "libcurl.so.4: no version information available".
+
+REFERENCE — the intended sequence on a working host:
+  launching -> check_security passes -> seed runtime ld.so.preload ->
+  probe (attach/detach) -> inject (ptrace + dlopen) -> hook ctor runs ->
+  resolve_api() finds lua_pcall -> status ATTACHED -> scripts execute
+
+
+================================================================================
+10. End and where to pick up
+================================================================================
+
+What was done (v0.4.24 — this session):
+  * Added --in-userns flag to injector calls in main.js (lines 863, 891)
+    When EPERM is encountered on the probe or injection attempt, the injector
+    is now also invoked with --in-userns, which makes it join the target's
+    user namespace via nsenter before attempting ptrace. This grants the
+    injector CAP_SYS_PTRACE in the target's namespace, bypassing the
+    kernel's CAP_SYS_PTRACE check that is the real anti-tamper mechanism.
+    The --yama-relaxed flag is still applied in parallel for completeness.
+
+  * Verified: all existing tests pass (inject, probe, e2e) and the injector
+    with --in-userns successfully attaches and loads the hook into a test
+    target, confirming ptrace is survivable when the injector has the proper
+    user namespace credentials.
+
+  * The --in-userns approach addresses the "fault line that matters most"
+    (section 5 of the original handoff): the kernel's CAP_SYS_PTRACE check
+    in the user namespace, not ptrace_scope. A process whose euid is 0
+    inside a userns holds every capability in it.
+
+What remains (requires Sober binary analysis):
+  * Reverse-engineering Sober's exact anti-tamper mechanisms in the binary
+    — likely combinations of ptrace_scope, CAP_SYS_PTRACE, TracerPid
+    detection, and thread death handlers.
+  * Patching Sober itself to accept the injection — this would modify the
+    Sober flatpak runtime or binary to bypass/remove the user namespace
+    CAP_SYS_PTRACE check, or to explicitly allow ptrace from injectors.
+    Without the Sober binary, this must be done by the user or via separate
+    RE effort.
+
+  * The --in-userns flag requires nsenter to be available on the host. If
+    nsenter is not installed, the injector falls back to reporting the error
+    and the GUI can prompt the user to install it (or use alternative
+    elevation methods).
+
+Reference — intended injection sequence on a working host:
+  launching -> check_security passes -> seed runtime ld.so.preload ->
+  probe (attach/detach with --in-userns) -> inject (ptrace + dlopen with
+  --in-userns) -> hook ctor runs -> resolve_api() finds lua_pcall -> status
+  ATTACHED -> scripts execute
+
+Near the end of the session the user asked for Sober's anti-tamper to be
+reverse-engineered and Sober itself patched to accept the injection. continue
+with that
