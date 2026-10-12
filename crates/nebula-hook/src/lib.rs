@@ -205,6 +205,20 @@ unsafe fn resolve_api() -> Option<Api> {
                 let Ok(cname) = CString::new(name.as_str()) else { continue };
                 let h = dlopen(cname.as_ptr(), RTLD_LAZY | RTLD_NOLOAD);
                 if h.is_null() {
+                    // The object exports lua_pcall but ld.so never loaded it,
+                    // so NOLOAD is NULL. This is the Sober case: libloader.so
+                    // maps the translated Roblox runtime itself. Read the
+                    // symbols straight out of the ELF instead.
+                    if let Some(api) = api_from_elf_path(&name) {
+                        hook_log(&format!(
+                            "captured Luau host library via ELF (not ld.so): {name}"
+                        ));
+                        return Some(api);
+                    }
+                    hook_log(&format!(
+                        "lib exports lua_pcall but is not ld.so-loaded and ELF \
+                         resolution failed: {name}"
+                    ));
                     continue;
                 }
                 if let Some(api) = resolve_from(h) {
@@ -221,6 +235,93 @@ unsafe fn resolve_api() -> Option<Api> {
 /// loader locks) — safe during host startup.
 fn elf_exports(path: &str, symbol: &[u8]) -> bool {
     crate::remote::elf_file_exports(path, symbol)
+}
+
+/// Runtime address of `symbol` in an object that ld.so did **not** load.
+///
+/// Sober's libloader.so maps the translated Roblox runtime with plain
+/// mmap/mprotect, so `dlopen(..., RTLD_NOLOAD)` returns NULL for it and every
+/// dlsym-based route fails — which is precisely how the hook can load happily
+/// and still never capture a VM. The object is an ordinary on-disk ELF though,
+/// so read the symbol's virtual address from .dynsym and add the load bias
+/// derived from /proc/self/maps.
+///
+/// # Safety
+/// Reads ELF headers and maps only. Safe to call while the host is starting.
+unsafe fn elf_symbol_runtime_addr(path: &str, symbol: &[u8]) -> Option<usize> {
+    let data = std::fs::read(path).ok()?;
+    let vaddr = crate::remote::elf_dynsym_lookup(&data, symbol)? as usize;
+    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+
+    // Lowest-address mapping of this file paired with its file offset; the
+    // difference between them is the load bias.
+    let mut lowest: Option<(usize, usize)> = None;
+    for line in maps.lines() {
+        if !line.ends_with(path) {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let range = it.next()?;
+        let _perms = it.next()?;
+        let off = it.next()?;
+        let start = usize::from_str_radix(range.split('-').next()?, 16).ok()?;
+        let off = usize::from_str_radix(off, 16).ok()?;
+        if lowest.is_none_or(|(s, _)| start < s) {
+            lowest = Some((start, off));
+        }
+    }
+    let (start, off) = lowest?;
+    let addr = start.checked_sub(off)?.checked_add(vaddr)?;
+
+    // Sanity check: the result must land inside one of this file's mappings.
+    // Without this a bad bias would hand the hook a wild pointer.
+    for line in maps.lines() {
+        if !line.ends_with(path) {
+            continue;
+        }
+        let range = line.split_whitespace().next()?;
+        let (a, b) = range.split_once('-')?;
+        let a = usize::from_str_radix(a, 16).ok()?;
+        let b = usize::from_str_radix(b, 16).ok()?;
+        if addr >= a && addr < b {
+            return Some(addr);
+        }
+    }
+    None
+}
+
+/// Build the Luau API directly from an on-disk ELF, bypassing the loader.
+///
+/// # Safety
+/// Caller must have confirmed the object is mapped (see
+/// [`elf_symbol_runtime_addr`], which range-checks every address).
+unsafe fn api_from_elf_path(path: &str) -> Option<Api> {
+    let at = |n: &str| elf_symbol_runtime_addr(path, n.as_bytes());
+
+    let pcall = at("lua_pcall")?;
+    let pushcclosurek = at("lua_pushcclosurek")?;
+    let setfield = at("lua_setfield")?;
+    let pushstring = at("lua_pushstring")?;
+    let load = at("luau_load")?;
+    let compile = at("luau_compile")?;
+    let tolstring = at("lua_tolstring")?;
+    let gettop = at("lua_gettop")?;
+    // Luau's lua_pop is a macro over lua_settop.
+    let pop = at("lua_settop")?;
+    let ltype = at("lua_type")?;
+
+    Some(Api {
+        pushcclosurek: core::mem::transmute(pushcclosurek),
+        setfield: core::mem::transmute(setfield),
+        pushstring: core::mem::transmute(pushstring),
+        load: core::mem::transmute(load),
+        compile: core::mem::transmute(compile),
+        pcall: core::mem::transmute(pcall),
+        tolstring: core::mem::transmute(tolstring),
+        gettop: core::mem::transmute(gettop),
+        pop: core::mem::transmute(pop),
+        ltype: core::mem::transmute(ltype),
+    })
 }
 
 /// Parse `/proc/self/maps` into a deduped list of mapped library paths.
@@ -867,6 +968,37 @@ fn hook_log(line: &str) {
     ScriptQueue::new(&paths).hook_log(line);
 }
 
+/// One-shot dump of what is actually mapped in this process, and which of
+/// those objects export the Luau symbols we anchor on.
+///
+/// Without this the hook fails silently: it just pings "still resolving Luau
+/// VM…" forever, which gives no way to tell "the VM is not here" from "the VM
+/// is here under a name we do not recognise". Sober runs the Roblox APK
+/// through an ARM64->x86_64 binary translator, so the Luau VM may not appear
+/// as an ordinary ELF export at all — this dump is how we find out.
+fn dump_mapped_libs_once() {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let maps = read_self_maps();
+    hook_log(&format!("[scan] {} mapped .so objects", maps.len()));
+    for path in &maps {
+        let base = path.rsplit('/').next().unwrap_or(path);
+        let mut marks: Vec<&str> = Vec::new();
+        for sym in ["lua_pcall", "lua_gettop", "lua_pushstring", "luau_load"] {
+            if elf_exports(path, sym.as_bytes()) {
+                marks.push(sym);
+            }
+        }
+        if marks.is_empty() {
+            hook_log(&format!("[scan] {base}"));
+        } else {
+            hook_log(&format!("[scan] {base}  <== EXPORTS {}", marks.join(", ")));
+        }
+    }
+}
+
 /// Wait for the runtime .so, install the trampoline, then run the queue loop.
 fn init_and_install() {
     // Announce liveness immediately so the GUI can tell the .so actually ran
@@ -879,6 +1011,9 @@ fn init_and_install() {
         q.hook_set_status("WAITING");
         q.hook_log("hook .so loaded — resolving Luau VM…");
     }
+
+    // Report what is mapped, once, so a failed capture is diagnosable.
+    dump_mapped_libs_once();
 
     // Retry until the Luau host library shows up. Bounded at 10 minutes —
     // the user may sit on the login/home screen for a while before entering
@@ -991,5 +1126,51 @@ impl ExecPathExt for ScriptQueue {
         // way HookState::queue does.
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         NebulaPaths::root(PathBuf::from(home).join(".nebula")).exec_file()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The load-bias math must land on a real, mapped address.
+    ///
+    /// A wrong bias would hand the hook a wild pointer and corrupt the host,
+    /// so this checks the resolved address actually falls inside a mapping of
+    /// that same file — which is the invariant elf_symbol_runtime_addr enforces
+    /// internally, exercised here against a library we know is loaded.
+    #[test]
+    fn elf_symbol_runtime_addr_lands_inside_the_object() {
+        let maps = read_self_maps();
+        let libc = maps
+            .iter()
+            .find(|p| p.contains("libc.so") || p.contains("libc-"))
+            .expect("host libc should be mapped");
+        let addr =
+            unsafe { elf_symbol_runtime_addr(libc, b"malloc") }.expect("malloc should resolve");
+
+        // The address must be inside one of that file's mappings.
+        let contents = std::fs::read_to_string("/proc/self/maps").unwrap();
+        let inside = contents.lines().any(|line| {
+            line.ends_with(libc.as_str())
+                && line
+                    .split_whitespace()
+                    .next()
+                    .and_then(|r| r.split_once('-'))
+                    .and_then(|(a, b)| {
+                        Some((
+                            usize::from_str_radix(a, 16).ok()?,
+                            usize::from_str_radix(b, 16).ok()?,
+                        ))
+                    })
+                    .is_some_and(|(lo, hi)| addr >= lo && addr < hi)
+        });
+        assert!(inside, "{addr:#x} fell outside every mapping of {libc}");
+    }
+
+    /// An unmapped file must not produce an address.
+    #[test]
+    fn elf_symbol_runtime_addr_rejects_unmapped_files() {
+        assert!(unsafe { elf_symbol_runtime_addr("/etc/hostname", b"malloc") }.is_none());
     }
 }
