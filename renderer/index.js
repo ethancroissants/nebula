@@ -23,6 +23,7 @@ const els = {
   fontSizeSelect: $('font-size-select'),
   cbAutoAttach: $('cb-auto-attach'),
   cbSafeMode: $('cb-safe-mode'),
+  cbAllowPtrace: $('cb-allow-ptrace'),
   editor: $('script-editor'),
   editorStatus: $('editor-status'),
   editorStats: $('editor-stats'),
@@ -33,7 +34,7 @@ const els = {
 };
 
 let state = {
-  prefs: { autoAttach: true, fontSize: 13, safeMode: false },
+  prefs: { autoAttach: true, fontSize: 13, safeMode: false, allowPtrace: false },
   procs: [],
   override: '',
   soberInstalled: false,
@@ -121,6 +122,7 @@ async function refresh() {
 
   els.cbAutoAttach.checked = !!state.prefs.autoAttach;
   els.cbSafeMode.checked = !!state.prefs.safeMode;
+  els.cbAllowPtrace.checked = !!state.prefs.allowPtrace;
   els.fontSizeSelect.value = String(state.prefs.fontSize);
   els.editor.style.fontSize = `${state.prefs.fontSize}px`;
 }
@@ -309,6 +311,20 @@ els.cbSafeMode.addEventListener('change', async () => {
   state.prefs.safeMode = els.cbSafeMode.checked;
   await window.nebula.savePrefs(state.prefs);
   log(`Safe mode ${state.prefs.safeMode ? 'ON — launches Sober without the hook' : 'off'}`);
+});
+
+els.cbAllowPtrace.addEventListener('change', async () => {
+  state.prefs.allowPtrace = els.cbAllowPtrace.checked;
+  await window.nebula.savePrefs(state.prefs);
+  if (state.prefs.allowPtrace) {
+    log(
+      'ptrace inject ENABLED — Sober treats being traced as hostile and will terminate. ' +
+        'This has never delivered the hook here; use only to confirm that diagnosis.',
+      'warn'
+    );
+  } else {
+    log('ptrace inject disabled (safe)');
+  }
 });
 
 els.btnClearConsole.addEventListener('click', () => {

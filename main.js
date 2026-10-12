@@ -324,7 +324,9 @@ function loadPrefs() {
   try {
     return JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8'));
   } catch {
-    return { autoAttach: true, fontSize: 13 };
+    // allowPtrace defaults to OFF: ptrace kills Sober on hosts with
+    // anti-debug, and it has never delivered the hook on this one.
+    return { autoAttach: true, fontSize: 13, allowPtrace: false };
   }
 }
 
@@ -349,6 +351,20 @@ function procHasHook(pid) {
   try {
     const maps = fs.readFileSync(`/proc/${pid}/maps`, 'utf8');
     return maps.includes('libnebula_hook');
+  } catch {
+    return false;
+  }
+}
+
+// True when the hook is mapped in a process that actually has the Luau VM,
+// i.e. one that also carries Sober's own runtime libraries. Sober re-execs
+// itself, so the hook can be present in a short-lived early process and gone
+// from the real one moments later. Counting any process with the hook mapped
+// made the UI report "Hook .so mapped" for a pid that then lost it.
+function procHasHookInGame(pid) {
+  try {
+    const maps = fs.readFileSync(`/proc/${pid}/maps`, 'utf8');
+    return maps.includes('libnebula_hook') && (maps.includes('libbadcpu') || maps.includes('libloader'));
   } catch {
     return false;
   }
@@ -444,21 +460,33 @@ async function applyOverride(hookLib) {
   const absHook = path.resolve(hookLib);
   const envRes = await run(`flatpak override --user --env=LD_PRELOAD="${absHook}" ${APP_ID}`, 15000);
 
-  if (fsRes.ok && libRes.ok && envRes.ok) {
+  // Tell the hook where its queue lives. Inside the sandbox $HOME is
+  // ~/.var/app/<app-id>, not the host's ~, so the hook would otherwise write
+  // its diagnostics somewhere the GUI never looks. This is the one variable
+  // that makes both sides agree on a single path.
+  const dirRes = await run(
+    `flatpak override --user --env=NEBULA_QUEUE_DIR="${QUEUE_DIR}" ${APP_ID}`,
+    15000
+  );
+
+  if (fsRes.ok && libRes.ok && envRes.ok && dirRes.ok) {
     // Verify it actually stuck — flatpak silently drops malformed overrides.
     let verified = false;
     try {
       const shown = await run(`flatpak override --user --show ${APP_ID}`, 10000);
-      verified = (shown.stdout || '').includes(absHook);
+      verified =
+        (shown.stdout || '').includes(absHook) &&
+        (shown.stdout || '').includes('NEBULA_QUEUE_DIR');
     } catch {}
     if (verified) {
       log(`LD_PRELOAD override set: ${absHook}`, 'ok');
+      log(`NEBULA_QUEUE_DIR override set: ${QUEUE_DIR}`, 'ok');
       return { ok: true };
     }
-    return { ok: false, error: 'LD_PRELOAD override did not appear in --show' };
+    return { ok: false, error: 'override did not appear in flatpak --show' };
   }
 
-  const err = [fsRes, libRes, envRes].map((r) => r.stderr).filter(Boolean).join('; ');
+  const err = [fsRes, libRes, envRes, dirRes].map((r) => r.stderr).filter(Boolean).join('; ');
   return { ok: false, error: err || 'flatpak override failed' };
 }
 
@@ -732,7 +760,7 @@ ipcMain.handle('nebula:launchAndInject', async () => {
 
       procs = await findSoberProcesses();
       if (procs.length === 0) continue;
-      const anyHook = procs.some((p) => procHasHook(p.pid));
+      const anyHook = procs.some((p) => procHasHookInGame(p.pid));
 
       // SEED GATE: don't touch any ld.so.preload until Sober's own
       // check_security has PASSED — if the hook is visible in its maps
@@ -800,15 +828,24 @@ ipcMain.handle('nebula:launchAndInject', async () => {
         }
       }
 
-      // REMOTE INJECT (fallback only). The primary path is the runtime
-      // ld.so.preload seeded before launch. If the hook is still unmapped
-      // well after Sober started, the preload did not take effect, and the
-      // last resort is to ptrace the live process and make it dlopen the hook.
+      // REMOTE INJECT — OPT-IN, OFF BY DEFAULT.
       //
-      // Note this is destructive on a host with anti-debug: Sober terminates
-      // when it notices it is being traced. So it runs only after the preload
-      // path has demonstrably failed, never in parallel with it.
-      if (seedingEnabled && checkSecurityPassed && !anyHook && elapsed >= 12) {
+      // This is the only remaining path, and on this host it has never once
+      // worked: every attempt ends in EPERM, "dlopen not found in target's
+      // mapped libc", or "running inside the target's user namespace"
+      // followed by nothing. Worse, it is *destructive*: Sober detects being
+      // traced and terminates. The launch log from v0.4.35 shows exactly
+      // that — "probe OK on pid 297365", then one second later
+      // "pid 297365: GETREFS: No such process", then "Sober exited early".
+      //
+      // The reason the old flow still triggered it automatically was a false
+      // negative on `anyHook` (see procHasHookInGame): the hook was mapped in
+      // a short-lived pre-re-exec process, so the game looked unhooked and
+      // the code fell through to ptrace. With that fixed, the real
+      // precondition — the hook never reaching the game process — is
+      // visible on its own, and ptrace would only run when a user has
+      // explicitly asked for it.
+      if (prefs.allowPtrace && seedingEnabled && checkSecurityPassed && !anyHook && elapsed >= 12) {
         if (Date.now() - lastInject > 10000) {
           lastInject = Date.now();
           sendProgress('waiting', 'No new process to preload — injecting into the running Sober…');
@@ -824,6 +861,9 @@ ipcMain.handle('nebula:launchAndInject', async () => {
                 (r.stdout || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', `[${label}] ${l}`));
                 (r.stderr || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', `[${label}] ${l}`));
               };
+              // Record exactly which pids are about to be traced, so the
+              // survivability check below can compare like with like.
+              const probedPids = (await findSoberProcesses()).map((p) => p.pid);
               let probe = await run(`"${inj}" ${hookLib} --attach-only`, 20000);
               if (!probe.ok && /EPERM/.test(probe.stderr || '')) {
                 sendProgress('preparing', 'probe needs admin rights — requesting…');
@@ -834,8 +874,15 @@ ipcMain.handle('nebula:launchAndInject', async () => {
               show(probe, 'probe');
 
               // Did the host survive being traced?
-              await sleep(600);
-              const stillAlive = findSoberProcessesSync().length > 0;
+              //
+              // Check the pids we ACTUALLY probed, not "is some Sober process
+              // alive". Sober forks several processes; one of them dying
+              // while a sibling lives made the old check report "survivable"
+              // and proceed to inject into a corpse. That is the crash: the
+              // probe killed a process, the check missed it, and the run
+              // continued into a doomed injection.
+              await sleep(1200);
+              const stillAlive = (await findSoberProcesses()).some((p) => probedPids.includes(p.pid));
               if (!stillAlive) {
                 sendProgress(
                   'error',

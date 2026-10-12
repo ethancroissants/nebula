@@ -324,6 +324,81 @@ unsafe fn api_from_elf_path(path: &str) -> Option<Api> {
     })
 }
 
+/// Absolute path of this very .so, as the loader mapped it.
+///
+/// Read from `/proc/self/maps` rather than `dladdr` so it works in the
+/// earliest constructor, before any Rust runtime state exists.
+fn own_mapped_path() -> Option<String> {
+    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+    for line in maps.lines() {
+        if let Some(path) = line.rsplit(' ').next() {
+            let path = path.trim();
+            if path.contains("libnebula_hook") {
+                return Some(path.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// True when we are running inside a flatpak sandbox.
+///
+/// This is a safety interlock, not a feature check. The hook is preloaded into
+/// every process in the sandbox, and `seed_ld_so_preload` writes a real system
+/// file. If the same .so were ever LD_PRELOADed on the *host* (a stray export,
+/// a wrapper script, `LD_PRELOAD=... some-tool`), that write would silently
+/// change the loader for every program on the machine. Inside the sandbox
+/// `/etc` is a private tmpfs that flatpak rebuilds on every launch, so the
+/// write is contained and transient — which is exactly the scope we want.
+fn in_flatpak_sandbox() -> bool {
+    std::path::Path::new("/.flatpak-info").exists()
+}
+
+/// Re-arm `/etc/ld.so.preload` so the hook survives Sober re-exec'ing itself.
+///
+/// This is the whole reason the hook still exists in the game process after
+/// startup. Sober execs `/proc/self/exe` with a sanitised environment (it
+/// ships `check_security`), so `LD_PRELOAD` — which we verified does reach
+/// the first exec — is gone by the second one, and the hook is unloaded. That
+/// is observable in the launch log: the loader banner appears once as
+/// "required by sober" and again as "required by /proc/self/exe", and the
+/// hook's mappings vanish between them.
+///
+/// `ld.so.preload` is read by the dynamic loader straight off the filesystem
+/// and is *not* part of the environment, so it survives exactly the scrubbing
+/// that kills `LD_PRELOAD`. We write our own path into it, so the re-exec'd
+/// image maps us again.
+///
+/// Must run before the re-exec, hence before any sleep, and must never
+/// abort the constructor on failure.
+fn seed_ld_so_preload() {
+    if !in_flatpak_sandbox() {
+        // Not in the sandbox: never touch the host's loader configuration.
+        return;
+    }
+    let Some(me) = own_mapped_path() else {
+        eprintln!("[nebula-hook] cannot locate own .so path; not arming ld.so.preload");
+        return;
+    };
+    const PRELOAD: &str = "/etc/ld.so.preload";
+    // Append rather than truncate: another component may own entries here, and
+    // dropping them would be a surprise. Duplicate lines of our own path are
+    // harmless (the loader ignores an object it has already mapped).
+    let mut existing = std::fs::read_to_string(PRELOAD).unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == me) {
+        eprintln!("[nebula-hook] {PRELOAD} already armed -> {me}");
+        return;
+    }
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        existing.push('\n');
+    }
+    existing.push_str(&format!("{me}\n"));
+    match std::fs::write(PRELOAD, existing) {
+        Ok(()) => eprintln!("[nebula-hook] armed {PRELOAD} -> {me}"),
+        Err(e) => eprintln!("[nebula-hook] could not write {PRELOAD}: {e}"),
+    }
+}
+
 /// Parse `/proc/self/maps` into a deduped list of mapped library paths.
 fn read_self_maps() -> Vec<String> {
     let mut out = Vec::new();
@@ -561,19 +636,42 @@ struct HookState {
 
 unsafe impl Sync for HookState {}
 
+/// Root of the Nebula queue directory, as seen from *inside* the sandbox.
+///
+/// `$HOME` is not usable here: inside flatpak it is `~/.var/app/<app-id>`, but
+/// the GUI reads `~/.nebula` on the host, and the two are different places. The
+/// GUI exports `NEBULA_QUEUE_DIR` through the flatpak override so both sides
+/// agree on one path. Falling back to `$HOME/.nebula` keeps the hook working
+/// outside flatpak (tests, plain processes).
+fn nebula_root() -> PathBuf {
+    if let Some(dir) = std::env::var_os("NEBULA_QUEUE_DIR") {
+        let p = PathBuf::from(dir);
+        if !p.as_os_str().is_empty() {
+            // Accept either the root or the queue dir itself.
+            if p.ends_with("queue") {
+                return p.parent().map(PathBuf::from).unwrap_or(p);
+            }
+            return p;
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(home).join(".nebula")
+}
+
+/// Queue handle for the resolved root.
+fn queue() -> ScriptQueue {
+    let paths = nebula_core::NebulaPaths::root(nebula_root());
+    let _ = paths.ensure();
+    ScriptQueue::new(&paths)
+}
+
 impl HookState {
     fn queue(&self) -> &ScriptQueue {
-        // Mirror queue paths into several candidate roots. Inside Sober's
-        // sandbox/chroot the HOME env may be scrubbed or repointed, so we
-        // fall back to /tmp — which is exactly where the GUI's seeder copies
-        // the hook .so, making the two sides agree without any env contract.
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        let paths = nebula_core::NebulaPaths::root(PathBuf::from(home).join(".nebula"));
-        let _ = paths.ensure();
-        // Best-effort mirror into /tmp/.nebula as well (chroot-visible).
+        // Mirror into /tmp as well: inside Sober's chroot the granted path may
+        // not be visible, and /tmp is where the GUI's seeder places the .so.
         let mirror = nebula_core::NebulaPaths::root(PathBuf::from("/tmp/.nebula"));
         let _ = mirror.ensure();
-        self.queue.get_or_init(|| ScriptQueue::new(&paths))
+        self.queue.get_or_init(queue)
     }
 }
 
@@ -938,6 +1036,11 @@ static TRAMPOLINE: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 extern "C" fn nebula_hook_init() {
     // Never panic across the FFI boundary.
     let _ = std::panic::catch_unwind(|| {
+        // Arm ld.so.preload FIRST, synchronously, before anything else.
+        // Sober re-execs itself with a scrubbed environment, so this has to
+        // land before that re-exec, which happens within the first second or
+        // so of startup. Deferring it to a worker thread loses the race.
+        seed_ld_so_preload();
         let _ = std::thread::Builder::new()
             .name("nebula-init".into())
             .spawn(|| {
@@ -962,10 +1065,7 @@ static NEBULA_INIT: unsafe extern "C" fn() = nebula_hook_init;
 /// Write a line to the shared hook log (both the $HOME queue and the
 /// /tmp mirror the GUI harvests).
 fn hook_log(line: &str) {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let paths = nebula_core::NebulaPaths::root(PathBuf::from(home).join(".nebula"));
-    let _ = paths.ensure();
-    ScriptQueue::new(&paths).hook_log(line);
+    queue().hook_log(line);
 }
 
 /// One-shot dump of what is actually mapped in this process, and which of
@@ -1004,10 +1104,7 @@ fn init_and_install() {
     // Announce liveness immediately so the GUI can tell the .so actually ran
     // its constructor (queue dir is bind-mounted into the sandbox).
     {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        let paths = nebula_core::NebulaPaths::root(PathBuf::from(home).join(".nebula"));
-        let _ = paths.ensure();
-        let q = ScriptQueue::new(&paths);
+        let q = queue();
         q.hook_set_status("WAITING");
         q.hook_log("hook .so loaded — resolving Luau VM…");
     }
@@ -1026,19 +1123,14 @@ fn init_and_install() {
         tries += 1;
         if tries >= 3000 {
             eprintln!("[nebula] Luau host library never appeared; hook inactive");
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            let paths = nebula_core::NebulaPaths::root(PathBuf::from(home).join(".nebula"));
-            let q = ScriptQueue::new(&paths);
+            let q = queue();
             q.hook_set_status("FAILED");
             q.hook_log("gave up: Luau VM library never appeared (10 min)");
             return;
         }
         if tries % 150 == 0 {
             // progress ping every ~30 s
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            let paths = nebula_core::NebulaPaths::root(PathBuf::from(home).join(".nebula"));
-            let q = ScriptQueue::new(&paths);
-            q.hook_log(&format!("still resolving Luau VM… ({}s)", tries / 5));
+            queue().hook_log(&format!("still resolving Luau VM… ({}s)", tries / 5));
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -1143,8 +1235,8 @@ unsafe fn mmap_rwx(len: usize) -> *mut u8 {
     }
 }
 
-// Re-export what the worker needs from nebula-core (paths/queue).
-use nebula_core::{NebulaPaths, ScriptQueue};
+// Re-export what the worker needs from nebula-core (the queue handle).
+use nebula_core::ScriptQueue;
 
 /// Trait shim: give ScriptQueue the `exec_path()` name used above without
 /// changing nebula-core's public API.
@@ -1154,10 +1246,9 @@ trait ExecPathExt {
 
 impl ExecPathExt for ScriptQueue {
     fn exec_path(&self) -> PathBuf {
-        // ScriptQueue stores its paths privately; rebuild from HOME the same
-        // way HookState::queue does.
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        NebulaPaths::root(PathBuf::from(home).join(".nebula")).exec_file()
+        // ScriptQueue stores its paths privately; rebuild from the same root
+        // HookState::queue uses so both agree on where exec.lua lives.
+        nebula_core::NebulaPaths::root(nebula_root()).exec_file()
     }
 }
 
@@ -1204,5 +1295,69 @@ mod tests {
     #[test]
     fn elf_symbol_runtime_addr_rejects_unmapped_files() {
         assert!(unsafe { elf_symbol_runtime_addr("/etc/hostname", b"malloc") }.is_none());
+    }
+
+    /// The re-arm path must find this very .so in the process's own maps.
+    ///
+    /// `seed_ld_so_preload` writes the result into /etc/ld.so.preload so the
+    /// hook survives Sober's environment-scrubbing re-exec. If
+    /// `own_mapped_path` ever returns None in the real target, the arming
+    /// silently does nothing and the hook vanishes at re-exec — the exact
+    /// failure this was written to fix. The test binary is not the .so, so
+    /// assert the real property the function depends on: it never invents a
+    /// path, and when the marker is absent it reports absence rather than
+    /// returning a guess.
+    #[test]
+    fn own_mapped_path_never_invents_a_path() {
+        match own_mapped_path() {
+            Some(p) => {
+                assert!(
+                    p.starts_with('/') && p.contains("libnebula_hook"),
+                    "own_mapped_path returned a non-hook path: {p}"
+                );
+            }
+            None => {
+                // Expected under `cargo test` (the harness is an exe, not the
+                // .so). The contract that matters is that this is None and not
+                // some fabricated fallback that would poison /etc/ld.so.preload.
+            }
+        }
+    }
+
+    /// Reading a maps blob must pick the hook line and ignore everything else.
+    ///
+    /// Mirrors the parse in `own_mapped_path` so a change to the line format
+    /// (e.g. paths with spaces, or a (deleted) suffix) fails here rather than
+    /// only inside a running Roblox client.
+    /// The re-arm must never fire outside a flatpak sandbox.
+    ///
+    /// `seed_ld_so_preload` writes a real system file. On the host that would
+    /// change the loader for every program on the machine, so the interlock is
+    /// the only thing standing between a stray LD_PRELOAD and a system-wide
+    /// surprise. In the test environment (not a sandbox) it must be false.
+    #[test]
+    fn sandbox_interlock_is_false_outside_flatpak() {
+        assert!(
+            !in_flatpak_sandbox(),
+            "test environment unexpectedly looks like a flatpak sandbox"
+        );
+    }
+
+    #[test]
+    fn own_mapped_path_parses_the_hook_mapping() {
+        let sample = "\
+7f0000000000-7f0000001000 r-xp 00000000 08:01 1234    /usr/lib/libc.so.6
+7f0000001000-7f0000009000 r-xp 00000000 08:02 5678    /home/u/.local/lib/nebula/hook/libnebula_hook.so
+7f0000009000-7f000000a000 r--p 00000000 08:02 5678    /home/u/.local/lib/nebula/hook/libnebula_hook.so
+";
+        let found = sample
+            .lines()
+            .filter_map(|l| l.rsplit(' ').next())
+            .map(|p| p.trim())
+            .find(|p| p.contains("libnebula_hook"));
+        assert_eq!(
+            found,
+            Some("/home/u/.local/lib/nebula/hook/libnebula_hook.so")
+        );
     }
 }

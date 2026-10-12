@@ -77,6 +77,11 @@
             <span class="slider"></span>
             Safe mode (no hook)
           </label>
+          <label class="switch" title="Fallback only: trace the live Sober and dlopen the hook into it. Sober detects being traced and TERMINATES. Never worked here; off by default.">
+            <input type="checkbox" id="cb-allow-ptrace">
+            <span class="slider"></span>
+            Allow ptrace inject (unsafe)
+          </label>
         </div>
       </section>
 
