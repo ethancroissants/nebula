@@ -746,17 +746,28 @@ mod tests {
 /// proceed even when the process is running in a sandbox or namespace where
 /// /proc/pid/exe doesn't resolve to a on-disk file that the injector can read.
 fn find_sober_binary(pid: i32) -> std::io::Result<std::path::PathBuf> {
-    // 1) Flatpak runtime path — most reliable for flatpak users.
-    // Try this first so that /proc/pid/exe shims in namespaces don't short-circuit
-    // the resolution to a path that doesn't actually exist on the host.
+    // 1) Flatpak runtime path — try multiple common layouts.
+    // We check both the full-hash path and the "current" symlink path.
     if let Ok(home) = std::env::var("HOME") {
-        let flatpak = format!(
+        // a) Full-hash stable path (original)
+        let full_hash = format!(
             "{}/.local/share/flatpak/app/org.vinegarhq.Sober/x86_64/stable/7b6430c703e8178baa536062099fc5a1e0c7cf213c0789695fa7660b62cb9d26/files/bin/sober",
             home
         );
-        if let Ok(path) = std::path::PathBuf::from(flatpak).canonicalize() {
+        if let Ok(path) = std::path::PathBuf::from(&full_hash).canonicalize() {
             if path.exists() && path.is_file() {
-                eprintln!("[nebula-inject] found Sober binary at flatpak runtime path");
+                eprintln!("[nebula-inject] found Sober binary at flatpak runtime path (full hash)");
+                return Ok(path);
+            }
+        }
+        // b) "current" symlink path
+        let current = format!(
+            "{}/.local/share/flatpak/app/org.vinegarhq.Sober/x86_64/stable/current/files/bin/sober",
+            home
+        );
+        if let Ok(path) = std::path::PathBuf::from(&current).canonicalize() {
+            if path.exists() && path.is_file() {
+                eprintln!("[nebula-inject] found Sober binary at flatpak runtime path (current symlink)");
                 return Ok(path);
             }
         }
@@ -785,9 +796,8 @@ fn find_sober_binary(pid: i32) -> std::io::Result<std::path::PathBuf> {
     Err(std::io::Error::new(
         std::io::ErrorKind::NotFound,
         format!("could not find Sober binary for pid {pid}",
-    )))
-}
-
+    ))
+)}
 fn patch_sober_binary(pid: i32) -> bool {
     // Attempt to locate the Sober binary, trying /proc/pid/exe first and
     // falling back to known paths if the process exe cannot be read or read.
