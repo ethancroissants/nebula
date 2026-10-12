@@ -213,7 +213,6 @@ ipcMain.handle('nebula:readLog', async () => {
     return '';
   }
 });
-
 // Legacy single-purpose handlers (kept for compatibility / scripting)
 ipcMain.handle('nebula:attach', async () => {
   const hookLib = findHookLib();
@@ -369,15 +368,40 @@ async function getHookStatus() {
     }
   }
 
+  // The hook writes a heartbeat to queue/status once its worker thread runs:
+  //   WAITING  = .so loaded, waiting for the Luau VM to appear
+  //   ATTACHED = lua_State captured — scripts will execute
   try {
     const status = fs.readFileSync(path.join(QUEUE_DIR, 'status'), 'utf8').trim();
     if (status === 'ATTACHED') {
       return { state: 'attached', message: 'Hook reported attached' };
     }
+    if (status === 'WAITING') {
+      return { state: 'waiting', message: 'Hook loaded — waiting for Luau VM' };
+    }
   } catch {}
 
   return { state: 'waiting', message: 'Sober running, hook not yet loaded' };
 }
+
+// Tail the hook's own log file (~/.nebula/queue/log) into the console.
+let lastLogPos = 0;
+setInterval(() => {
+  try {
+    const data = fs.readFileSync(LOG_FILE, 'utf8');
+    if (data.length >= lastLogPos) {
+      const chunk = data.slice(lastLogPos);
+      lastLogPos = data.length;
+      if (chunk.trim()) {
+        for (const line of chunk.split('\n')) {
+          if (line.trim()) sendProgress('hooklog', line);
+        }
+      }
+    } else {
+      lastLogPos = 0; // log was rotated/truncated
+    }
+  } catch {}
+}, 700);
 
 app.whenReady().then(() => {
   ensureDirs();

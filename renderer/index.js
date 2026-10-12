@@ -125,6 +125,11 @@ async function refresh() {
 
 // Live progress from the main process during launch & inject.
 window.nebula.onProgress(({ phase, message }) => {
+  if (phase === 'hooklog') {
+    // The hook's own log lines from inside the game — show as-is.
+    log(`[hook] ${message}`);
+    return;
+  }
   setStage(message, phase === 'error' ? 'err' : phase === 'injected' || phase === 'installed' ? 'ok' : phase === 'timeout' ? 'warn' : '');
   switch (phase) {
     case 'preparing':
