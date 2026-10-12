@@ -150,7 +150,15 @@ fn set_yama_scope(value: u32) -> bool {
 }
 
 fn main() -> ExitCode {
-    let argv: Vec<String> = env::args().skip(1).collect();
+    // --yama-relaxed: the caller (the GUI) has already relaxed Yama and will
+    // restore it, so never escalate from in here. Nebula's front-end is the
+    // process that can actually show a password dialog; a sudo prompt fired
+    // from this child would land on a terminal nobody is watching.
+    let argv: Vec<String> = env::args()
+        .skip(1)
+        .filter(|a| a != "--yama-relaxed")
+        .collect();
+    let yama_relaxed = env::args().any(|a| a == "--yama-relaxed");
     if argv.first().map(|s| s == "--spawn").unwrap_or(false) {
         if argv.len() < 3 {
             eprintln!("usage: nebula-inject --spawn <lib> <program> [args...]");
@@ -193,6 +201,15 @@ fn main() -> ExitCode {
     let (code, denied) = inject_into(&pids, &lib);
     if code == ExitCode::SUCCESS {
         return ExitCode::SUCCESS;
+    }
+
+    if denied && yama_relaxed {
+        eprintln!(
+            "[nebula-inject] still EPERM even though the GUI reported ptrace_scope relaxed.\n\
+             \x20             If you have already given Nebula admin rights, check the value:\n\
+             \x20             cat /proc/sys/kernel/yama/ptrace_scope"
+        );
+        return ExitCode::from(1);
     }
 
     // Every attempt was refused by Yama's ptrace_scope.

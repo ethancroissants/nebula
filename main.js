@@ -122,6 +122,157 @@ function run(cmd, timeoutMs = 30000) {
   });
 }
 
+// Same, but writes to the child's stdin first (used to feed a password).
+function runWithStdin(cmd, input, timeoutMs = 30000) {
+  return new Promise((resolve) => {
+    const child = spawn('/bin/sh', ['-c', cmd], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch {}
+    }, timeoutMs);
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, stdout: stdout.trim(), stderr: stderr.trim() });
+    });
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve({ ok: false, stdout: '', stderr: 'spawn failed' });
+    });
+    try { child.stdin.end(input); } catch {}
+  });
+}
+
+// --- Privilege escalation -----------------------------------------------
+// Nebula needs root for exactly two things: writing the flatpak runtime's
+// /etc/ld.so.preload, and relaxing kernel.yama.ptrace_scope for the
+// injector. Neither may ever fall back to a terminal prompt — Nebula is a
+// GUI app, so an invisible sudo prompt on a TTY we don't control is just a
+// hang. Silent paths come first; we only ask, and we ask graphically.
+
+let cachedSudoPassword = null; // only ever set after the user actually typed one
+
+function shQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+function commandExists(cmd) {
+  for (const dir of (process.env.PATH || '').split(':')) {
+    if (!dir) continue;
+    try {
+      fs.accessSync(path.join(dir, cmd), fs.constants.X_OK);
+      return true;
+    } catch {}
+  }
+  return false;
+}
+
+// Ask for a password in a desktop dialog. Returns null if cancelled or if
+// no dialog tool is installed.
+async function promptPasswordGui() {
+  const message = 'Nebula needs administrator access to configure Sober.';
+  if (commandExists('zenity')) {
+    const r = await run(
+      `zenity --password --title=Nebula --text=${shQuote(message)}`,
+      120000,
+    );
+    return r.ok && r.stdout ? r.stdout : null;
+  }
+  if (commandExists('kdialog')) {
+    const r = await run(
+      `kdialog --password --title Nebula --inputbox ${shQuote(message)}`,
+      120000,
+    );
+    return r.ok && r.stdout ? r.stdout : null;
+  }
+  return null;
+}
+
+// Run `script` as root, escalating however we can without a terminal.
+// Tries passwordless sudo, then PolicyKit (which hands off to the desktop's
+// own agent, so the prompt is a real dialog labelled with the app), and
+// only then asks for the password ourselves.
+async function runPrivileged(script, timeoutMs = 30000) {
+  const wrapped = `sh -c ${shQuote(script)}`;
+
+  // 1. Passwordless sudo — silent, and how Nebula has always worked.
+  const silent = await run(`sudo -n ${wrapped}`, timeoutMs);
+  if (silent.ok) return { ok: true, how: 'sudo (no password needed)' };
+
+  // 2. PolicyKit: uses the session's polkit agent for a graphical prompt.
+  if (commandExists('pkexec')) {
+    const polkit = await run(`pkexec ${wrapped}`, timeoutMs);
+    if (polkit.ok) return { ok: true, how: 'PolicyKit' };
+  }
+
+  // 3. Last resort: collect the password in our own dialog and feed it to
+  //    sudo -S. Cached, because a single launch can need root two or three
+  //    times and re-asking for each would be maddening.
+  let password = cachedSudoPassword;
+  if (password === null) {
+    password = await promptPasswordGui();
+    if (!password) return { ok: false, how: 'cancelled by user' };
+  }
+  const fed = await runWithStdin(`sudo -S -p '' ${wrapped}`, `${password}\n`, timeoutMs);
+  if (fed.ok) {
+    cachedSudoPassword = password;
+    return { ok: true, how: 'GUI password prompt' };
+  }
+  // Wrong password — don't keep offering it again.
+  cachedSudoPassword = null;
+  return { ok: false, how: 'denied', error: fed.stderr };
+}
+
+function yamaScope() {
+  try {
+    return parseInt(fs.readFileSync('/proc/sys/kernel/yama/ptrace_scope', 'utf8').trim(), 10);
+  } catch {
+    return null;
+  }
+}
+
+// Run `fn` with Yama's ptrace_scope temporarily relaxed, restoring it
+// afterwards no matter how it ends. This is a security setting, so it only
+// stays off for the duration of the injection.
+async function withYamaRelaxed(fn) {
+  const previous = yamaScope();
+  if (previous === null || previous === 0) return fn();
+
+  log(`Relaxing yama ptrace_scope ${previous} → 0 for the injection…`, 'preparing');
+  const relax = await runPrivileged(
+    `echo 0 > /proc/sys/kernel/yama/ptrace_scope`,
+    120000,
+  );
+  if (!relax.ok) {
+    log(
+      `Could not relax ptrace_scope (${relax.how}). Injection may be refused by Yama.`,
+      'warn',
+    );
+    return fn(); // try anyway — the injector reports the real error
+  }
+  log(`ptrace_scope relaxed (${relax.how}).`);
+
+  try {
+    return await fn();
+  } finally {
+    const restore = await runPrivileged(
+      `echo ${previous} > /proc/sys/kernel/yama/ptrace_scope`,
+      60000,
+    );
+    if (restore.ok) {
+      log(`ptrace_scope restored to ${previous}.`);
+    } else {
+      log(
+        `WARNING: could not restore ptrace_scope to ${previous} (${restore.how}). ` +
+        `Run manually: sudo sh -c 'echo ${previous} > /proc/sys/kernel/yama/ptrace_scope'`,
+        'warn',
+      );
+    }
+  }
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function sendProgress(phase, message) {
@@ -269,15 +420,12 @@ async function clearStalePreloads() {
       log(`Cleared stale Nebula preload entry from ${file}`);
     } catch (e) {
       if (e.code === 'EACCES' || e.code === 'EPERM') {
-        const res = await run(
-          `sudo -n sh -c 'printf "%s" ${JSON.stringify(cleaned)} > "${file}"'`,
-          15000,
-        );
+        const res = await runPrivileged(`printf '%s' ${shQuote(cleaned)} > ${shQuote(file)}`, 15000);
         if (res.ok) {
           cleared++;
-          log(`Cleared stale Nebula preload entry from ${file} (sudo)`);
+          log(`Cleared stale Nebula preload entry from ${file} (${res.how})`);
         } else {
-          log(`Could not clear ${file} — Sober may pre-crash. Run: sudo sh -c "echo -n > ${file}"`, 'warn');
+          log(`Could not clear ${file} — Sober may pre-crash. Run as root: sh -c "echo -n > ${file}"`, 'warn');
         }
       }
     }
@@ -305,18 +453,18 @@ async function seedRuntimePreload(hookLib) {
         break; // first writable runtime wins
       } catch (e) {
         if (e.code === 'EACCES' || e.code === 'EPERM') {
-          // System install — try a non-interactive sudo before giving up.
-          const res = await run(
-            `sudo -n sh -c 'mkdir -p "${etc}" && printf "%s\\n" "${hookLib}" > "${etc}/ld.so.preload"'`,
+          // System install — escalate (dialog, never a terminal prompt).
+          const res = await runPrivileged(
+            `mkdir -p ${shQuote(etc)} && printf '%s\\n' ${shQuote(hookLib)} > ${shQuote(path.join(etc, 'ld.so.preload'))}`,
             15000,
           );
           if (res.ok) {
-            seedNotes.push(`runtime preload OK via sudo: ${etc}`);
+            seedNotes.push(`runtime preload OK (${res.how}): ${etc}`);
             runtimePreloadPath = hookLib;
             seeded = true;
             break;
           }
-          seedNotes.push(`runtime not writable: ${etc} (system install — run: sudo sh -c 'mkdir -p "${etc}" && echo "${hookLib}" > "${etc}/ld.so.preload"')`);
+          seedNotes.push(`runtime not writable: ${etc} (${res.how})`);
         } else {
           seedNotes.push(`runtime seed failed: ${etc} (${e.code || e})`);
         }
@@ -699,7 +847,13 @@ ipcMain.handle('nebula:launchAndInject', async () => {
           try {
             const inj = findInjectHelper(hookLib);
             if (inj) {
-              const res = await run(`"${inj}" /tmp/libnebula_hook.so`, 30000);
+              // Relax Yama here rather than letting the injector do it: this
+              // is the GUI process, so this is where a password prompt can
+              // actually be shown to the user. The injector is told the scope
+              // is already handled so it never tries to sudo on its own.
+              const res = await withYamaRelaxed(() =>
+                run(`"${inj}" /tmp/libnebula_hook.so --yama-relaxed`, 30000),
+              );
               (res.stdout || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', l));
               (res.stderr || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', l));
             } else {
