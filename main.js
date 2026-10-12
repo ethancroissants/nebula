@@ -207,26 +207,26 @@ async function anyProcHasHook() {
 async function applyOverride(hookLib) {
   await run(`flatpak override --user --reset ${APP_ID}`, 15000);
   fs.mkdirSync(QUEUE_DIR, { recursive: true });
+  // NOTE: we deliberately do NOT set --env=LD_PRELOAD anymore. When both
+  // LD_PRELOAD and /etc/ld.so.preload list the hook (different paths), the
+  // loader can map it twice — two constructors, two trampoline installs,
+  // a double-patched lua_pcall → crash. /etc/ld.so.preload alone covers
+  // every sandbox process and survives Sober's env-scrubbing stub.
   const fsRes = await run(`flatpak override --user --filesystem="${QUEUE_DIR}:rw" ${APP_ID}`, 15000);
 
   // CRITICAL: the sandbox blocks $HOME entirely (Sober's manifest has no
-  // filesystem permissions). LD_PRELOAD pointing into $HOME is silently
-  // ignored by the loader if the file can't be read — which is exactly the
-  // "stuck waiting for hook" bug. Grant the lib's directory read-only.
+  // filesystem permissions). Preload paths pointing into $HOME are silently
+  // ignored by the loader if the file can't be read. Grant the lib's
+  // directory read-only so the runtime-level preload file resolves.
   const libDir = path.dirname(hookLib);
   const libRes = await run(`flatpak override --user --filesystem="${libDir}:ro" ${APP_ID}`, 15000);
 
-  const envRes = await run(`flatpak override --user --env=LD_PRELOAD="${hookLib}" ${APP_ID}`, 15000);
-
-  // BELT & SUSPENDERS: Sober's launcher is UPX-style packed and its stub
-  // scrubs the environment on its internal re-exec — LD_PRELOAD reaches the
-  // launcher process but is gone by the time the actual game process starts
-  // (that's the "attached, then back to linking" symptom). glibc's
-  // /etc/ld.so.preload lives inside the sandbox's /etc (sourced from the
-  // flatpak runtime, which is user-writable on user installs), and it applies
-  // to EVERY process launched in the sandbox regardless of environment.
+  // BELT & SUSPENDERS: write the hook path into the flatpak runtime's
+  // /etc/ld.so.preload (sandbox /etc is sourced from it). glibc reads it at
+  // every process start inside the sandbox regardless of environment.
   let preloadRes = { ok: true };
   const seedNotes = [];
+  let runtimePreloadPath = '';
   try {
     const rtDirs = runtimeEtcDirs();
     let seeded = false;
@@ -235,6 +235,7 @@ async function applyOverride(hookLib) {
         fs.mkdirSync(etc, { recursive: true });
         fs.writeFileSync(path.join(etc, 'ld.so.preload'), `${hookLib}\n`);
         seedNotes.push(`runtime preload OK: ${etc}`);
+        runtimePreloadPath = hookLib;
         seeded = true;
         break; // first writable runtime wins
       } catch (e) {
@@ -246,6 +247,7 @@ async function applyOverride(hookLib) {
           );
           if (res.ok) {
             seedNotes.push(`runtime preload OK via sudo: ${etc}`);
+            runtimePreloadPath = hookLib;
             seeded = true;
             break;
           }
@@ -262,13 +264,19 @@ async function applyOverride(hookLib) {
   } catch {}
   void preloadRes;
 
-  if (fsRes.ok && envRes.ok && libRes.ok) {
-    // Verify the override actually stuck before launching.
-    const show = await run(`flatpak override --user --show ${APP_ID}`, 15000);
-    if (show.ok && show.stdout.includes('LD_PRELOAD') && show.stdout.includes('libnebula_hook')) {
+  if (fsRes.ok && libRes.ok) {
+    // Verify the runtime preload actually stuck before launching.
+    let verified = false;
+    for (const etc of runtimeEtcDirs()) {
+      try {
+        const content = fs.readFileSync(path.join(etc, 'ld.so.preload'), 'utf8');
+        if (content.includes('libnebula_hook')) { verified = true; break; }
+      } catch {}
+    }
+    if (verified || !runtimePreloadPath) {
       return { ok: true };
     }
-    return { ok: false, error: 'Override verification failed: ' + (show.stdout || show.stderr) };
+    return { ok: false, error: 'Runtime preload verification failed (ld.so.preload missing)' };
   }
 
   // Fallback: legacy attach helper script
@@ -280,7 +288,7 @@ async function applyOverride(hookLib) {
   }
   return {
     ok: false,
-    error: [fsRes, libRes, envRes].map((r) => r.stderr).filter(Boolean).join('; ') || 'flatpak override failed',
+    error: [fsRes, libRes].map((r) => r.stderr).filter(Boolean).join('; ') || 'flatpak override failed',
   };
 }
 
@@ -615,6 +623,7 @@ async function getHookStatus() {
 // fast inside the game — cap how much we relay per tick and keep a ring
 // buffer of recent lines so a flood can't wedge the renderer.
 let lastLogPos = 0;
+let mainLogInitialized = false;
 const rootLogMarks = new Map(); // path -> last size
 const MAX_LOG_LINES_PER_TICK = 40;
 let marksInitialized = false;
@@ -627,7 +636,11 @@ setInterval(() => {
   };
   try {
     const data = fs.readFileSync(LOG_FILE, 'utf8');
-    if (data.length >= lastLogPos) {
+    if (!mainLogInitialized) {
+      // Skip stale content from previous sessions.
+      lastLogPos = data.length;
+      mainLogInitialized = true;
+    } else if (data.length >= lastLogPos) {
       const chunk = data.slice(lastLogPos);
       lastLogPos = data.length;
       if (chunk.trim()) relay(chunk);

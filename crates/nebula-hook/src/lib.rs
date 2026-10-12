@@ -167,7 +167,7 @@ unsafe fn resolve_api() -> Option<Api> {
     }
 
     // 1: NOLOAD dlopen by soname.
-    let mut handle = dlopen(c"libSoberRuntime.so".as_ptr(), RTLD_LAZY | RTLD_NOLOAD);
+    let handle = dlopen(c"libSoberRuntime.so".as_ptr(), RTLD_LAZY | RTLD_NOLOAD);
     if !handle.is_null() {
         if let Some(api) = resolve_from(handle) {
             return Some(api);
@@ -737,8 +737,40 @@ fn worker_tick(h: &HookState) -> Tick {
     Tick::Nothing
 }
 
+/// Take an exclusive flock on the queue dir so a duplicated load of this
+/// .so (e.g. both LD_PRELOAD and ld.so.preload listing it under different
+/// paths) can't double-install trampolines and crash the game.
+fn acquire_singleton_lock() -> Option<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    extern "C" {
+        fn flock(fd: c_int, operation: c_int) -> c_int;
+    }
+    const LOCK_EX: c_int = 2;
+    const LOCK_NB: c_int = 4;
+    let _ = std::fs::create_dir_all("/tmp/.nebula/queue");
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open("/tmp/.nebula/.hook-lock")
+        .ok()?;
+    if unsafe { flock(f.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
+        return None; // another instance already owns the hook
+    }
+    Some(f)
+}
+
 /// Worker thread body. Runs forever (daemon-like); dies with the process.
 fn worker(h: &'static HookState) {
+    // If another copy of this .so is already running in this process, exit —
+    // double trampolines would corrupt each other.
+    let _lock = match acquire_singleton_lock() {
+        Some(f) => f,
+        None => {
+            let q = h.queue();
+            q.hook_log("another hook instance active — standing down");
+            return;
+        }
+    };
     let mut last_status = String::new();
     loop {
         let status = if h.main_l.load(Ordering::Acquire).is_null() {
