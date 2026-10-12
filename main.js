@@ -203,28 +203,11 @@ async function anyProcHasHook() {
   return false;
 }
 
-// Apply the flatpak override ourselves (no external script, no PATH issues).
-async function applyOverride(hookLib) {
-  await run(`flatpak override --user --reset ${APP_ID}`, 15000);
-  fs.mkdirSync(QUEUE_DIR, { recursive: true });
-  // NOTE: we deliberately do NOT set --env=LD_PRELOAD anymore. When both
-  // LD_PRELOAD and /etc/ld.so.preload list the hook (different paths), the
-  // loader can map it twice — two constructors, two trampoline installs,
-  // a double-patched lua_pcall → crash. /etc/ld.so.preload alone covers
-  // every sandbox process and survives Sober's env-scrubbing stub.
-  const fsRes = await run(`flatpak override --user --filesystem="${QUEUE_DIR}:rw" ${APP_ID}`, 15000);
-
-  // CRITICAL: the sandbox blocks $HOME entirely (Sober's manifest has no
-  // filesystem permissions). Preload paths pointing into $HOME are silently
-  // ignored by the loader if the file can't be read. Grant the lib's
-  // directory read-only so the runtime-level preload file resolves.
-  const libDir = path.dirname(hookLib);
-  const libRes = await run(`flatpak override --user --filesystem="${libDir}:ro" ${APP_ID}`, 15000);
-
-  // BELT & SUSPENDERS: write the hook path into the flatpak runtime's
-  // /etc/ld.so.preload (sandbox /etc is sourced from it). glibc reads it at
-  // every process start inside the sandbox regardless of environment.
-  let preloadRes = { ok: true };
+// Write the hook path into the flatpak runtime's /etc/ld.so.preload (sandbox
+// /etc is sourced from it). glibc reads it at every process start inside the
+// sandbox regardless of environment. Tries the user runtime first, then a
+// non-interactive sudo for system installs. Returns whether anything stuck.
+async function seedRuntimePreload(hookLib) {
   const seedNotes = [];
   let runtimePreloadPath = '';
   try {
@@ -262,7 +245,37 @@ async function applyOverride(hookLib) {
     }
     for (const note of seedNotes) log(note, seeded ? 'ok' : 'warn');
   } catch {}
-  void preloadRes;
+  return { seeded: !!runtimePreloadPath, runtimePreloadPath };
+}
+
+// Apply the flatpak override ourselves (no external script, no PATH issues).
+// `skipRuntimePreload`: leave every ld.so.preload untouched — used when the
+// launch must look clean until Sober's check_security has passed.
+async function applyOverride(hookLib, { skipRuntimePreload = false } = {}) {
+  await run(`flatpak override --user --reset ${APP_ID}`, 15000);
+  fs.mkdirSync(QUEUE_DIR, { recursive: true });
+  // NOTE: we deliberately do NOT set --env=LD_PRELOAD anymore. When both
+  // LD_PRELOAD and /etc/ld.so.preload list the hook (different paths), the
+  // loader can map it twice — two constructors, two trampoline installs,
+  // a double-patched lua_pcall → crash. /etc/ld.so.preload alone covers
+  // every sandbox process and survives Sober's env-scrubbing stub.
+  const fsRes = await run(`flatpak override --user --filesystem="${QUEUE_DIR}:rw" ${APP_ID}`, 15000);
+
+  // CRITICAL: the sandbox blocks $HOME entirely (Sober's manifest has no
+  // filesystem permissions). Preload paths pointing into $HOME are silently
+  // ignored by the loader if the file can't be read. Grant the lib's
+  // directory read-only so the runtime-level preload file resolves.
+  const libDir = path.dirname(hookLib);
+  const libRes = await run(`flatpak override --user --filesystem="${libDir}:ro" ${APP_ID}`, 15000);
+
+  // BELT & SUSPENDERS: seed the runtime-level preload unless the caller wants
+  // a clean launch (the seed gate writes it later, after check_security).
+  let runtimePreloadPath = '';
+  if (!skipRuntimePreload) {
+    const seeded = await seedRuntimePreload(hookLib);
+    runtimePreloadPath = seeded.runtimePreloadPath;
+  }
+  void runtimePreloadPath;
 
   if (fsRes.ok && libRes.ok) {
     // Verify the runtime preload actually stuck before launching.
@@ -300,7 +313,8 @@ ipcMain.handle('nebula:getState', async () => {
   const procs = await findSoberProcesses();
   const override = await getOverride();
   const hookStatus = await getHookStatus();
-  const hookLib = findHookLib();  return {
+  const hookLib = findHookLib();
+  return {
     prefs,
     procs,
     override,
@@ -436,17 +450,20 @@ ipcMain.handle('nebula:launchAndInject', async () => {
       return { ok: true, injected: false, safeMode: true };
     }
 
-    // 2. Apply + verify the sandbox override
-    sendProgress('preparing', 'Applying sandbox override…');
-    const override = await applyOverride(hookLib);
-    if (!override.ok) {
-      sendProgress('error', 'Override failed — see console.');
-      log(`Override error details: ${override.error}`, 'err');
-      return { ok: false, error: override.error || 'override failed' };
-    }
-
-    // 2b. Safe mode = don't seed /etc/ld.so.preload at all.
+    // 2b. Override the sandbox — but WITHOUT the runtime ld.so.preload write.
+    // That write happens right after check_security (see seed gate below).
     const seedingEnabled = !prefs.safeMode;
+    let override;
+    if (seedingEnabled) {
+      override = await applyOverride(hookLib, { skipRuntimePreload: true });
+      if (!override.ok) {
+        sendProgress('error', 'Override failed — see console.');
+        log(`Override error details: ${override.error}`, 'err');
+        return { ok: false, error: override.error || 'override failed' };
+      }
+    } else {
+      override = { ok: true };
+    }
 
     // 3. Launch Sober detached, but capture its stderr — Sober's crash
     // output (panics, libbadcpu FATALs, loader errors) goes there and is
@@ -459,6 +476,7 @@ ipcMain.handle('nebula:launchAndInject', async () => {
     const child = spawn('flatpak', ['run', APP_ID], { detached: true, stdio: ['ignore', 'ignore', soberLog] });
     child.unref();
     let soberSeen = 0;
+    let checkSecurityPassed = false;
     let soberDead = false;
     const soberTail = () => {
       try {
@@ -475,9 +493,14 @@ ipcMain.handle('nebula:launchAndInject', async () => {
     const crashPoll = setInterval(() => {
       const chunk = soberTail();
       for (const line of chunk.split('\n')) {
-        if (line.trim()) sendProgress('hooklog', `[sober] ${line}`);
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        sendProgress('hooklog', `[sober] ${trimmed}`);
+        if (trimmed.includes('check_security')) {
+          checkSecurityPassed = true;
+          sendProgress('log', 'check_security seen — seeding hook preload now');
+        }
       }
-      // Is the flatpak process still alive?
       try {
         process.kill(child.pid, 0);
       } catch {
@@ -498,6 +521,7 @@ ipcMain.handle('nebula:launchAndInject', async () => {
     let lastNotice = 0;
     let seededRoots = new Set();
     let diagDone = false;
+    let runtimeSeedDone = false;
     while (Date.now() < deadline) {
       await sleep(700);
       const elapsed = Math.round((Date.now() - started) / 1000);
@@ -515,9 +539,22 @@ ipcMain.handle('nebula:launchAndInject', async () => {
       if (procs.length === 0) continue;
       const anyHook = procs.some((p) => procHasHook(p.pid));
 
+      // SEED GATE: don't touch any ld.so.preload until Sober's own
+      // check_security has PASSED — if the hook is visible in its maps
+      // during the check, Sober exits by design. After the gate opens,
+      // seed in two layers:
+      //   1. The flatpak runtime's /etc/ld.so.preload — covers every
+      //      process the sandbox starts from here on (the game exec).
+      //   2. Per-process root seeding — belt & suspenders for anything
+      //      that already started or runs in a private chroot.
+      if (seedingEnabled && checkSecurityPassed && !runtimeSeedDone) {
+        runtimeSeedDone = true;
+        sendProgress('preparing', 'check_security passed — seeding runtime preload…');
+        await seedRuntimePreload(hookLib);
+      }
       // Seed /etc/ld.so.preload into EVERY Sober process's filesystem view.
-      // (Skipped in safe mode — no hook anywhere.)
-      if (seedingEnabled) {
+      // Held back until the check_security gate opens (see above).
+      if (seedingEnabled && checkSecurityPassed) {
         for (const proc of procs) {
           if (seededRoots.has(proc.pid)) continue;
           const ok = seedHookIntoProcRoot(proc.pid, hookLib);
