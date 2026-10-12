@@ -780,8 +780,9 @@ ipcMain.handle('nebula:launchAndInject', async () => {
         for (const proc of procs) {
           try {
             const pre = fs.readFileSync(`/proc/${proc.pid}/root/etc/ld.so.preload`, 'utf8').trim();
-            const so = fs.existsSync(`/proc/${proc.pid}/root/tmp/libnebula_hook.so`);
-            sendProgress('log', `pid ${proc.pid} preload=${pre || '(empty)'} .so=${so ? 'present' : 'missing'}`);
+            // Check the LD_PRELOAD path, not the old /tmp copy.
+            const so = fs.existsSync(`/proc/${proc.pid}/root${hookLib}`);
+            sendProgress('log', `pid ${proc.pid} hookFileVisible=${so ? 'yes' : 'no'} ld.so.preload=${pre || '(none)'}`);
           } catch (e) {
             sendProgress('log', `pid ${proc.pid} /etc/ld.so.preload unreadable (${e.code})`);
           }
@@ -819,11 +820,11 @@ ipcMain.handle('nebula:launchAndInject', async () => {
                 (r.stdout || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', `[${label}] ${l}`));
                 (r.stderr || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', `[${label}] ${l}`));
               };
-              let probe = await run(`"${inj}" /tmp/libnebula_hook.so --attach-only`, 20000);
+              let probe = await run(`"${inj}" ${hookLib} --attach-only`, 20000);
               if (!probe.ok && /EPERM/.test(probe.stderr || '')) {
                 sendProgress('preparing', 'probe needs admin rights — requesting…');
                 probe = await withYamaRelaxed(() =>
-                  run(`"${inj}" /tmp/libnebula_hook.so --attach-only --yama-relaxed --in-userns`, 20000),
+                  run(`"${inj}" ${hookLib} --attach-only --yama-relaxed --in-userns`, 20000),
                 );
               }
               show(probe, 'probe');
@@ -841,7 +842,7 @@ ipcMain.handle('nebula:launchAndInject', async () => {
               }
               sendProgress('log', 'probe survived — proceeding with injection');
 
-              const plain = await run(`"${inj}" /tmp/libnebula_hook.so`, 30000);
+              const plain = await run(`"${inj}" ${hookLib}`, 30000);
               show(plain, 'inject');
               let res = plain;
               if (!plain.ok && /EPERM/.test(plain.stderr || '')) {
@@ -851,7 +852,7 @@ ipcMain.handle('nebula:launchAndInject', async () => {
                 // it never tries to sudo on its own.
                 sendProgress('preparing', 'ptrace refused — requesting admin rights…');
                 res = await withYamaRelaxed(() =>
-                  run(`"${inj}" /tmp/libnebula_hook.so --yama-relaxed --in-userns`, 30000),
+                  run(`"${inj}" ${hookLib} --yama-relaxed --in-userns`, 30000),
                 );
                 // Show this attempt too: overwriting `res` silently threw
                 // away the first attempt's diagnostics, which is exactly the
