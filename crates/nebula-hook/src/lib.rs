@@ -45,6 +45,8 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub mod remote;
+
 // ---------------------------------------------------------------------------
 // Luau C API bindings (resolved dynamically from libSoberRuntime.so)
 // ---------------------------------------------------------------------------

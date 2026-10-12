@@ -521,6 +521,7 @@ ipcMain.handle('nebula:launchAndInject', async () => {
     let lastNotice = 0;
     let seededRoots = new Set();
     let diagDone = false;
+    let lastInject = 0;
     let runtimeSeedDone = false;
     while (Date.now() < deadline) {
       await sleep(700);
@@ -585,6 +586,32 @@ ipcMain.handle('nebula:launchAndInject', async () => {
             const hasLoader = maps.includes('libloader') || maps.includes('libbadcpu');
             sendProgress('log', `pid ${proc.pid} (${comm}): hook=${hasHook ? 'yes' : 'no'} loader=${hasLoader ? 'yes' : 'no'}`);
           } catch {}
+        }
+      }
+
+      // REMOTE INJECT: ld.so.preload is only read at process START, but
+      // Sober's SingleSurfaceApp keeps the game (and its Luau VM) in the
+      // process that already booted — nothing new execs after the gate
+      // opens, so seeding alone can never load the hook. Once the gate is
+      // open and the .so is present in the sandbox but still unmapped,
+      // ptrace-attach and make the running process dlopen it directly.
+      if (seedingEnabled && checkSecurityPassed && !anyHook && elapsed >= 12) {
+        if (Date.now() - lastInject > 10000) {
+          lastInject = Date.now();
+          sendProgress('waiting', 'No new process to preload — injecting into the running Sober…');
+          try {
+            let inj = path.join(__dirname, 'hook', 'nebula-inject');
+            if (!fs.existsSync(inj)) inj = path.join(__dirname, 'nebula-inject');
+            if (fs.existsSync(inj)) {
+              const res = await run(`"${inj}" /tmp/libnebula_hook.so`, 30000);
+              (res.stdout || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', l));
+              (res.stderr || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', l));
+            } else {
+              sendProgress('log', 'nebula-inject helper not found — skipping remote injection');
+            }
+          } catch (e) {
+            sendProgress('log', `inject error: ${e}`);
+          }
         }
       }
 

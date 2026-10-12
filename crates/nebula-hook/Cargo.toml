@@ -8,8 +8,9 @@ description = "The injected hook: captures the Luau VM inside Sober and runs que
 
 [lib]
 name = "nebula_hook"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 nebula-core = { path = "../nebula-core" }
 serde_json = { workspace = true }
+libc = "0.2"

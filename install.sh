@@ -131,6 +131,7 @@ build_from_source() {
     mkdir -p "$INSTALL_DIR"
     cp "$TMP/src/target/release/nebula" "$INSTALL_DIR/"
     cp "$TMP/src/target/release/libnebula_hook.so" "$INSTALL_DIR/"
+    cp "$TMP/src/target/release/nebula-inject" "$INSTALL_DIR/" 2>/dev/null || true
     cp "$TMP/src/nebula-attach" "$INSTALL_DIR/"
     chmod +x "$INSTALL_DIR/nebula" "$INSTALL_DIR/nebula-attach"
 }
@@ -158,6 +159,15 @@ install_links() {
     if [ -n "$attach" ]; then
         chmod +x "$attach"
         ln -sf "$attach" "$BIN_DIR/nebula-attach"
+    fi
+
+    local inject=""
+    for candidate in "$INSTALL_DIR/nebula-inject" "$INSTALL_DIR/hook/nebula-inject"; do
+        [ -f "$candidate" ] && { inject="$candidate"; break; }
+    done
+    if [ -n "$inject" ]; then
+        chmod +x "$inject"
+        ln -sf "$inject" "$BIN_DIR/nebula-inject"
     fi
     case ":$PATH:" in
         *":$BIN_DIR:"*) ;;

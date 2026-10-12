@@ -61,6 +61,7 @@ jobs:
           # Include the Rust-built hook alongside the Electron app
           mkdir -p dist/nebula-linux-x86_64/hook
           cp target/release/libnebula_hook.so dist/nebula-linux-x86_64/hook/
+          cp target/release/nebula-inject dist/nebula-linux-x86_64/hook/
           cp nebula-attach dist/nebula-linux-x86_64/hook/
           tar -czf dist/nebula-linux-x86_64.tar.gz -C dist nebula-linux-x86_64
 
