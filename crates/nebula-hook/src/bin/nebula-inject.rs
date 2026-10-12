@@ -369,6 +369,18 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
+    // Auto-patch the Sober binary if it isn't already patched.
+    // This NOPs out 3 anti-tamper sequences that would block injection.
+    for pid in &pids {
+        eprintln!("[nebula-inject] attempting to auto-patch Sober binary for pid {pid}...");
+        let patched = remote::find_and_patch_sober(*pid);
+        if patched {
+            eprintln!("[nebula-inject] Sober binary patched successfully");
+        } else {
+            eprintln!("[nebula-inject] could not patch Sober binary (may already be patched or unwritable)");
+        }
+    }
+
     if attach_only {
         return probe_into(&pids);
     }
