@@ -742,6 +742,7 @@ ipcMain.handle('nebula:launchAndInject', async () => {
     let lastNotice = 0;
     let seededRoots = new Set();
     let diagDone = false;
+    let hookEverSeen = false;
     let lastInject = 0;
     let runtimeSeedDone = false;
     let earlyDiagDone = false;
@@ -760,7 +761,25 @@ ipcMain.handle('nebula:launchAndInject', async () => {
 
       procs = await findSoberProcesses();
       if (procs.length === 0) continue;
-      const anyHook = procs.some((p) => procHasHookInGame(p.pid));
+
+      // Track the hook's PRESENCE over time, not just right now.
+      //
+      // Sober re-execs itself, and the hook's presence in /proc/<pid>/maps is
+      // therefore transient: it appears when the loader maps the .so and
+      // disappears across the re-exec. A single sample cannot see that — in
+      // v0.4.36 an external sampler saw hook=4 while this loop, reading the
+      // same pid in the same second, saw hook=no, and the two readings were
+      // both "correct". Latching "was ever seen" makes the run honest: it
+      // distinguishes "never loaded" from "loaded, dropped by a re-exec".
+      let hookPresentNow = false;
+      for (const p of procs) {
+        if (procHasHookInGame(p.pid)) hookPresentNow = true;
+        if (procHasHook(p.pid) && !hookEverSeen) {
+          hookEverSeen = true;
+          sendProgress('log', `hook observed mapped in pid ${p.pid} — latching`);
+        }
+      }
+      const anyHook = hookPresentNow;
 
       // SEED GATE: don't touch any ld.so.preload until Sober's own
       // check_security has PASSED — if the hook is visible in its maps
@@ -823,7 +842,14 @@ ipcMain.handle('nebula:launchAndInject', async () => {
             const maps = fs.readFileSync(`/proc/${proc.pid}/maps`, 'utf8');
             const hasHook = maps.includes('libnebula_hook');
             const hasLoader = maps.includes('libloader') || maps.includes('libbadcpu');
-            sendProgress('log', `pid ${proc.pid} (${comm}): hook=${hasHook ? 'yes' : 'no'} loader=${hasLoader ? 'yes' : 'no'}`);
+            // Count the hook's mappings, not just a yes/no. A single sample
+            // cannot distinguish "never loaded" from "loaded, then re-exec'd
+            // away, then loaded again" — that contradiction is exactly what a
+            // one-shot check produced in v0.4.36 (hook=4 while sampling,
+            // hook=no at the same instant). The count makes the difference
+            // visible: a stable non-zero count is a loaded hook.
+            const hookMaps = maps.split('\n').filter((l) => l.includes('libnebula_hook')).length;
+            sendProgress('log', `pid ${proc.pid} (${comm}): hook=${hasHook ? 'yes' : 'no'} hookMaps=${hookMaps} loader=${hasLoader ? 'yes' : 'no'}`);
           } catch {}
         }
       }
@@ -932,9 +958,19 @@ ipcMain.handle('nebula:launchAndInject', async () => {
       }
     }
 
-    sendProgress('timeout', 'Sober launched, but hook not detected yet.');
+    // Report what actually happened, distinguishing the two cases that used to
+    // look identical.
+    if (hookEverSeen) {
+      sendProgress(
+        'error',
+        'The hook WAS mapped, but it is not resident now — Sober re-execs itself and ' +
+          'drops the .so between execs. It never captured the Luau VM, so no script ran.',
+      );
+    } else {
+      sendProgress('error', 'The hook was never mapped in any Sober process.');
+    }
     clearInterval(crashPoll);
-    return { ok: true, injected: false, error: 'hook not detected within timeout' };
+    return { ok: true, injected: false, error: 'hook not resident at timeout' };
   } catch (err) {
     sendProgress('error', `Launch failed: ${err}`);
     return { ok: false, error: String(err) };

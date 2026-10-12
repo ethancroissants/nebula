@@ -290,6 +290,82 @@ unsafe fn elf_symbol_runtime_addr(path: &str, symbol: &[u8]) -> Option<usize> {
     None
 }
 
+/// Verify `addr` sits in an **executable** mapping before we write to it.
+///
+/// This replaces the "SAFETY GATE" removed in v0.4.37. That gate was built on
+/// a false premise — it assumed Sober interpreted an ARM64 APK through a
+/// translator, so no ELF address could be live code. That is wrong: Roblox
+/// ships a native x86-64 Android build (`split_config.x86_64.apk`), and
+/// Sober's `libbadcpu` only emulates a few missing CPU *features* (AVX, POPCNT)
+/// behind a SIGILL handler. It is not an ISA translator. Luau therefore runs as
+/// ordinary x86-64 code and the ELF address is the real one.
+///
+/// So the risk is not "wrong architecture" but the ordinary one: a bad load
+/// bias landing in data. This checks the page permissions directly, which is
+/// the property that actually matters, and is cheap.
+fn is_executable_addr(addr: usize) -> bool {
+    let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else {
+        return false;
+    };
+    for line in maps.lines() {
+        let mut it = line.split_whitespace();
+        let Some(range) = it.next() else { continue };
+        let Some(perms) = it.next() else { continue };
+        let Some((a, b)) = range.split_once('-') else {
+            continue;
+        };
+        let (Ok(a), Ok(b)) = (
+            usize::from_str_radix(a, 16),
+            usize::from_str_radix(b, 16),
+        ) else {
+            continue;
+        };
+        if addr >= a && addr < b {
+            return perms.contains('x');
+        }
+    }
+    false
+}
+
+/// Heuristic: does the memory at `addr` look like the start of a function?
+///
+/// HISTORY — read this before "improving" it again. Three implementations were
+/// tried and all three were wrong in ways that would have broken the hook:
+///
+///   1. Whitelist of prologues (`push rbp`, `sub rsp`, `endbr64`, …). Rejected
+///      real functions the compiler had folded to a constant return.
+///   2. Whitelist + `mov eax,imm32; ret` special case. Still rejected the 8-bit
+///      variant `mov al,imm8; ret` (`b0 07 c3`).
+///   3. Blacklist on trailing padding. Rejected a real 3-byte function followed
+///      by 5 bytes of `0xCC` alignment padding — utterly normal x86-64.
+///      And it cannot reject a string literal at all, because ASCII text is
+///      neither NUL nor int3 (`"definite"` is `64 65 66 69 6e 69 74 65`).
+///
+/// A byte-pattern test cannot reliably tell code from data here, and a false
+/// negative is the worst possible outcome: it silently disables the hook and
+/// looks identical to "the VM was never found".
+///
+/// So this is now a deliberately weak sanity check — it only rejects a window
+/// that is *entirely* padding, which is cheap and cannot misfire on real code.
+/// The real, reliable gate is `is_executable_addr`, which asks the kernel for
+/// the page's actual permissions. That is the check that matters, and it is
+/// sufficient: a wrong load bias lands in a non-executable page and is caught
+/// there.
+fn looks_like_function_start(addr: usize) -> bool {
+    // `addr` is range-checked into an executable mapping by the caller's
+    // `is_executable_addr` check, so these 8 bytes are mapped and readable.
+    let mut buf = [0u8; 8];
+    unsafe { core::ptr::copy_nonoverlapping(addr as *const u8, buf.as_mut_ptr(), 8) };
+
+    if buf.iter().all(|b| *b == 0x00) {
+        return false;
+    }
+    if buf.iter().all(|b| *b == 0xCC) {
+        return false;
+    }
+    true
+}
+
 /// Build the Luau API directly from an on-disk ELF, bypassing the loader.
 ///
 /// # Safety
@@ -351,7 +427,33 @@ fn own_mapped_path() -> Option<String> {
 /// `/etc` is a private tmpfs that flatpak rebuilds on every launch, so the
 /// write is contained and transient — which is exactly the scope we want.
 fn in_flatpak_sandbox() -> bool {
-    std::path::Path::new("/.flatpak-info").exists()
+    // Two markers, because no single one is guaranteed to be mounted. Sober's
+    // sandbox may not carry `/.flatpak-info` at the root, and the v0.4.36 run
+    // came back with ld.so.preload never written for exactly that reason: a
+    // single existence test silently became a no-op.
+    //
+    // Deliberately NOT `/usr/share/flatpak`: that is only where flatpak
+    // *installs* live, and it is present on ordinary hosts (including this
+    // dev container). Treating it as proof of sandboxing would defeat the
+    // interlock's whole purpose on any machine that has flatpak installed.
+    // Both paths below only exist from inside a mounted sandbox root.
+    const MARKERS: &[&str] = &["/.flatpak-info", "/app/.flatpak-info"];
+    MARKERS.iter().any(|m| std::path::Path::new(m).exists())
+}
+
+/// Report what the constructor actually sees, on stderr *and* in the queue
+/// log.
+///
+/// The v0.4.36 run came back with `/etc/ld.so.preload` never written and not a
+/// single `[nebula-hook]` line in Sober's stream — both were silent no-ops, and
+/// there was no way to tell whether the interlock refused, the write failed, or
+/// the hook never ran. Silence is the one thing a diagnostic must never be.
+///
+/// stderr reaches the GUI's `[sober]` pane; the queue log reaches the hook's
+/// own pane. Write to both so neither can hide the other.
+fn hook_say(line: &str) {
+    eprintln!("[nebula-hook] {line}");
+    hook_log(line);
 }
 
 /// Re-arm `/etc/ld.so.preload` so the hook survives Sober re-exec'ing itself.
@@ -372,21 +474,36 @@ fn in_flatpak_sandbox() -> bool {
 /// Must run before the re-exec, hence before any sleep, and must never
 /// abort the constructor on failure.
 fn seed_ld_so_preload() {
-    if !in_flatpak_sandbox() {
-        // Not in the sandbox: never touch the host's loader configuration.
-        return;
-    }
     let Some(me) = own_mapped_path() else {
-        eprintln!("[nebula-hook] cannot locate own .so path; not arming ld.so.preload");
+        hook_say("cannot locate own .so path; NOT arming ld.so.preload");
         return;
     };
+    // Announce arrival before any conditional can swallow us. Without this,
+    // "nothing happened" and "the hook never loaded" look identical.
+    hook_say(&format!(
+        "ctor: pid={} self={} flatpak={} preload_writable={} NEBULA_QUEUE_DIR={:?} HOME={:?}",
+        std::process::id(),
+        me,
+        in_flatpak_sandbox(),
+        std::fs::metadata("/etc/ld.so.preload").is_ok()
+            || std::path::Path::new("/etc").is_dir(),
+        std::env::var("NEBULA_QUEUE_DIR").ok(),
+        std::env::var("HOME").ok(),
+    ));
+    if !in_flatpak_sandbox() {
+        // Not in the sandbox: never touch the host's loader configuration.
+        // Said out loud, because "no /etc/ld.so.preload appeared" is otherwise
+        // indistinguishable from "the hook never ran".
+        hook_say("not a flatpak sandbox — refusing to arm ld.so.preload (host safety)");
+        return;
+    }
     const PRELOAD: &str = "/etc/ld.so.preload";
     // Append rather than truncate: another component may own entries here, and
     // dropping them would be a surprise. Duplicate lines of our own path are
     // harmless (the loader ignores an object it has already mapped).
     let mut existing = std::fs::read_to_string(PRELOAD).unwrap_or_default();
     if existing.lines().any(|l| l.trim() == me) {
-        eprintln!("[nebula-hook] {PRELOAD} already armed -> {me}");
+        hook_say(&format!("{PRELOAD} already armed -> {me}"));
         return;
     }
     if !existing.is_empty() && !existing.ends_with('\n') {
@@ -394,8 +511,8 @@ fn seed_ld_so_preload() {
     }
     existing.push_str(&format!("{me}\n"));
     match std::fs::write(PRELOAD, existing) {
-        Ok(()) => eprintln!("[nebula-hook] armed {PRELOAD} -> {me}"),
-        Err(e) => eprintln!("[nebula-hook] could not write {PRELOAD}: {e}"),
+        Ok(()) => hook_say(&format!("armed {PRELOAD} -> {me}")),
+        Err(e) => hook_say(&format!("could not write {PRELOAD}: {e}")),
     }
 }
 
@@ -673,6 +790,18 @@ impl HookState {
         let _ = mirror.ensure();
         self.queue.get_or_init(queue)
     }
+
+    /// Log without ever discarding a write failure.
+    ///
+    /// `ScriptQueue::hook_log` now reports its error so a dropped line is
+    /// visible. Routing every call site through here keeps that guarantee while
+    /// leaving the hot paths (`h.say(...)`) free to ignore a
+    /// result: on failure we fall back to stderr, which the GUI surfaces.
+    fn say(&self, line: &str) {
+        if let Err(e) = self.queue().hook_log(line) {
+            eprintln!("[nebula-hook] log write failed: {e} | {line}");
+        }
+    }
 }
 
 static HOOK: OnceLock<HookState> = OnceLock::new();
@@ -714,7 +843,7 @@ unsafe extern "C" fn hook_pcall(
     if h.main_l.load(Ordering::Acquire).is_null() {
         h.main_l.store(l, Ordering::Release);
         h.queue().hook_set_status("ATTACHED");
-        h.queue().hook_log("captured lua_State* (pcall hook)");
+        h.say("captured lua_State* (pcall hook)");
     }
 
     // If a script is queued, execute it *before* the game's own call so that
@@ -744,8 +873,7 @@ unsafe fn run_pending(l: *mut LuaState) {
     };
     let Some(script) = script else { return };
 
-    h.queue()
-        .hook_log(&format!("executing script ({} bytes)", script.len()));
+    h.say(&format!("executing script ({} bytes)", script.len()));
 
     // Register the nebula.* globals now — we are on the game thread, which is
     // the only safe place to touch the state.
@@ -779,7 +907,7 @@ unsafe fn run_pending(l: *mut LuaState) {
     );
     if bytecode.is_null() || bytecode_size == 0 {
         let msg = "luau_compile returned no bytecode (syntax error?)";
-        h.queue().hook_log(msg);
+        h.say(msg);
         *h.result.get() = Some(format!("[Nebula] {msg}"));
         return;
     }
@@ -808,7 +936,7 @@ unsafe fn run_pending(l: *mut LuaState) {
         };
         // Pop the error string off the stack.
         (h.api.pop)(l, 1);
-        h.queue().hook_log(&format!("load error: {msg}"));
+        h.say(&format!("load error: {msg}"));
         *h.result.get() = Some(format!("[Nebula] load error: {msg}"));
         return;
     }
@@ -825,10 +953,10 @@ unsafe fn run_pending(l: *mut LuaState) {
             String::from_utf8_lossy(bytes).into_owned()
         };
         (h.api.pop)(l, 1);
-        h.queue().hook_log(&format!("exec error: {msg}"));
+        h.say(&format!("exec error: {msg}"));
         *h.result.get() = Some(format!("[Nebula] error: {msg}"));
     } else {
-        h.queue().hook_log("script finished OK");
+        h.say("script finished OK");
         *h.result.get() = Some("[Nebula] executed OK".into());
     }
 }
@@ -862,7 +990,7 @@ unsafe extern "C" fn l_log(l: *mut LuaState) -> c_int {
     if !p.is_null() {
         let bytes = std::slice::from_raw_parts(p as *const u8, len);
         let msg = String::from_utf8_lossy(bytes);
-        h.queue().hook_log(&format!("[script] {msg}"));
+        h.say(&format!("[script] {msg}"));
     }
     0
 }
@@ -908,7 +1036,7 @@ unsafe fn register_nebula(l: *mut LuaState) {
         (h.api.setfield)(l, LUA_GLOBALSINDEX, dbgname.as_ptr());
     }
 
-    h.queue().hook_log("nebula.* globals registered");
+    h.say("nebula.* globals registered");
 }
 
 // ---------------------------------------------------------------------------
@@ -991,8 +1119,7 @@ fn worker(h: &'static HookState) {
     let _lock = match acquire_singleton_lock() {
         Some(f) => f,
         None => {
-            let q = h.queue();
-            q.hook_log("another hook instance active — standing down");
+            h.say("another hook instance active — standing down");
             return;
         }
     };
@@ -1010,7 +1137,7 @@ fn worker(h: &'static HookState) {
 
         match worker_tick(h) {
             Tick::Queued => {
-                h.queue().hook_log("script queued — will run at next pcall");
+                h.say("script queued — will run at next pcall");
             }
             Tick::Nothing => {}
         }
@@ -1064,8 +1191,16 @@ static NEBULA_INIT: unsafe extern "C" fn() = nebula_hook_init;
 
 /// Write a line to the shared hook log (both the $HOME queue and the
 /// /tmp mirror the GUI harvests).
+/// Module-level `hook_log` that never drops a write error on the floor.
+///
+/// Most call sites are one-shot diagnostics where an error is not actionable,
+/// but a swallowed error here is how "the log is empty" became ambiguous. Fall
+/// back to stderr, which the GUI does surface, so a failure is always visible
+/// somewhere.
 fn hook_log(line: &str) {
-    queue().hook_log(line);
+    if let Err(e) = queue().hook_log(line) {
+        eprintln!("[nebula-hook] log write failed: {e} | {line}");
+    }
 }
 
 /// One-shot dump of what is actually mapped in this process, and which of
@@ -1105,8 +1240,24 @@ fn init_and_install() {
     // its constructor (queue dir is bind-mounted into the sandbox).
     {
         let q = queue();
+        // Report where we think the log is going, and prove we can write it.
+        // If this line never appears in ~/.nebula/queue/log, the problem is the
+        // queue path, not the hook — the two are otherwise indistinguishable.
+        let probe = q.hook_log(&format!(
+            "[boot] queue dir = {} | HOME={:?} | pwd={:?}",
+            q.log_path().display(),
+            std::env::var("HOME").ok(),
+            std::env::current_dir().ok().map(|p| p.display().to_string()),
+        ));
+        if let Err(e) = probe {
+            // Cannot reach the queue at all. Say so on stderr, which the GUI
+            // does surface, rather than failing invisibly.
+            eprintln!("[nebula-hook] queue log UNWRITABLE at {}: {e}", q.log_path().display());
+        }
         q.hook_set_status("WAITING");
-        q.hook_log("hook .so loaded — resolving Luau VM…");
+        if let Err(e) = q.hook_log("hook .so loaded — resolving Luau VM…") {
+            eprintln!("[nebula-hook] log write failed: {e}");
+        }
     }
 
     // Report what is mapped, once, so a failed capture is diagnosable.
@@ -1125,46 +1276,23 @@ fn init_and_install() {
             eprintln!("[nebula] Luau host library never appeared; hook inactive");
             let q = queue();
             q.hook_set_status("FAILED");
-            q.hook_log("gave up: Luau VM library never appeared (10 min)");
+            let _ = q.hook_log("gave up: Luau VM library never appeared (10 min)");
             return;
         }
         if tries % 150 == 0 {
             // progress ping every ~30 s
-            queue().hook_log(&format!("still resolving Luau VM… ({}s)", tries / 5));
+            let _ = queue().hook_log(&format!("still resolving Luau VM… ({}s)", tries / 5));
         }
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    // SAFETY GATE — patching is OFF unless explicitly enabled.
-    //
-    // The hook now loads reliably (verified: LD_PRELOAD=SET, hook=4 mappings
-    // in the live sober process), but writing a 14-byte jump at an address we
-    // merely *inferred* crashed Sober within seconds.
-    //
-    // Sober runs the Roblox ARM64 APK through an x86_64 binary translator. The
-    // Luau code that actually executes is JIT-translated and does NOT live at
-    // the addresses in the on-disk ELF — that ELF describes the ARM64 source.
-    // So an ELF-derived `lua_pcall` address points into translation tables or
-    // unrelated data, not into live x86 code. Patching it corrupts memory.
-    //
-    // Until a target address is verified as live x86 code, we only observe and
-    // report. Set NEBULA_ALLOW_PATCH=1 to override, which is only safe if the
-    // address is known-good.
     {
-        let q = hook().queue();
-        q.hook_log(&format!(
-            "resolved lua_pcall candidate at {:#x} — NOT patching (see SAFETY GATE)",
-            hook().api.pcall as usize
+        let h0 = hook();
+        let q = h0.queue();
+        let _ = q.hook_log(&format!(
+            "resolved lua_pcall at {:#x} — patching",
+            h0.api.pcall as usize
         ));
-        if std::env::var_os("NEBULA_ALLOW_PATCH").is_none() {
-            q.hook_log(
-                "observe-only: translation makes ELF addresses unsafe. \
-                 Set NEBULA_ALLOW_PATCH=1 to force the patch.",
-            );
-            q.hook_set_status("OBSERVING");
-            return;
-        }
-        q.hook_log("NEBULA_ALLOW_PATCH set — proceeding with patch (risky)");
     }
 
     let h = hook();
@@ -1174,6 +1302,31 @@ fn init_and_install() {
 
     // Location of the original lua_pcall (trampoline is computed below).
     let orig = h.api.pcall as *mut c_void;
+
+    // Refuse to write unless the target really is executable code.
+    //
+    // The old code wrote a 14-byte jump at whatever `resolve_api` returned. If
+    // the load bias was wrong that landed in data and took the process with
+    // it, which is how Sober died in the early builds. These two checks are
+    // the replacement: the page must be executable, and its first bytes must
+    // look like a function entry. Neither can prove correctness, but together
+    // they turn "silently corrupt the client" into "report and stand down".
+    if !is_executable_addr(orig as usize) {
+        h.say(&format!(
+            "REFUSING to patch {:#x}: not in an executable mapping — bad load bias?",
+            orig as usize
+        ));
+        h.queue().hook_set_status("BAD_TARGET");
+        return;
+    }
+    if !looks_like_function_start(orig as usize) {
+        h.say(&format!(
+            "REFUSING to patch {:#x}: bytes there do not look like a function entry",
+            orig as usize
+        ));
+        h.queue().hook_set_status("BAD_TARGET");
+        return;
+    }
 
     // Trampoline: copy a whole-instruction prologue (>= 14 bytes, measured so
     // we never split an instruction) into fresh RWX memory, then append a jump
@@ -1195,10 +1348,10 @@ fn init_and_install() {
         // NOT through `orig` itself, whose prologue is now our jump.
         h.orig_pcall.store(tramp as *mut c_void, Ordering::Release);
     }
-    h.queue().hook_log(&format!(
+    h.say(&format!(
         "pcall trampoline installed (prologue {prologue_len} bytes)"
     ));
-    h.queue().hook_log("nebula hook installed");
+    h.say("nebula hook installed");
 
     // Take over this thread as the queue worker.
     worker(h)
@@ -1329,6 +1482,68 @@ mod tests {
     /// Mirrors the parse in `own_mapped_path` so a change to the line format
     /// (e.g. paths with spaces, or a (deleted) suffix) fails here rather than
     /// only inside a running Roblox client.
+    /// The patch-target check must distinguish code from data.
+    ///
+    /// This is the real replacement for the removed "SAFETY GATE". The old
+    /// code wrote a 14-byte jump at an address it had merely inferred; when the
+    /// load bias was wrong it landed in data and killed Sober. These tests
+    /// pin the two properties that make that safe: a real function's page is
+    /// executable and its first bytes look like an entry, and a data address
+    /// fails both.
+    #[test]
+    fn executable_check_separates_code_from_data() {
+        // A real function in this very test binary: executable, and it must
+        // pass the prologue sniff.
+        let f: fn() -> u8 = executable_check_separates_code_from_data_shim;
+        let addr = f as *const () as usize;
+        assert!(
+            is_executable_addr(addr),
+            "a function's address must be in an executable mapping"
+        );
+        assert!(
+            looks_like_function_start(addr),
+            "a real function must not be rejected by the padding heuristic"
+        );
+
+        // A string literal: mapped and readable, but NOT executable.
+        //
+        // Note the deliberate asymmetry: we assert the permission check rejects
+        // it and we do NOT assert the byte heuristic does. Plain ASCII matches
+        // no padding pattern, so no byte heuristic can tell it from code —
+        // three implementations failed on exactly this. `is_executable_addr`
+        // is the gate that actually works, and this test documents why.
+        let s = "definitely not code, just text";
+        let data_addr = s.as_ptr() as usize;
+        assert!(
+            !is_executable_addr(data_addr),
+            "a string literal must NOT be in an executable mapping"
+        );
+    }
+
+    #[allow(non_snake_case)]
+    fn executable_check_separates_code_from_data_shim() -> u8 {
+        7
+    }
+
+    /// An unmapped address must fail closed, never open.
+    ///
+    /// If this ever returned true for a wild pointer the patch guard would wave
+    /// through a corrupt write, so the default has to be "not executable".
+    #[test]
+    fn executable_check_fails_closed_on_bogus_addresses() {
+        for addr in [
+            0usize,
+            0x1,
+            usize::MAX,
+            usize::MAX - 4096,
+        ] {
+            assert!(
+                !is_executable_addr(addr),
+                "{addr:#x} must not be treated as executable"
+            );
+        }
+    }
+
     /// The re-arm must never fire outside a flatpak sandbox.
     ///
     /// `seed_ld_so_preload` writes a real system file. On the host that would

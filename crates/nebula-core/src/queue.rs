@@ -82,8 +82,14 @@ impl ScriptQueue {
     }
 
     /// Hook side: append a line to the shared log.
-    pub fn hook_log(&self, line: &str) {
-        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&self.log) {
+    ///
+    /// Returns an error when the *primary* log could not be written. Callers
+    /// on the hook side surface this: a silently dropped log line is
+    /// indistinguishable from a hook that never ran, which is exactly the
+    /// ambiguity that made v0.4.36 undiagnosable.
+    pub fn hook_log(&self, line: &str) -> std::io::Result<()> {
+        let primary = OpenOptions::new().create(true).append(true).open(&self.log);
+        if let Ok(mut f) = primary.as_ref() {
             let _ = writeln!(f, "{line}");
         }
         // Mirror into /tmp/.nebula — inside Sober's chroot $HOME may be
@@ -96,6 +102,15 @@ impl ScriptQueue {
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&mirror) {
             let _ = writeln!(f, "{line}");
         }
+        match primary {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Path of the primary shared log, for diagnostics.
+    pub fn log_path(&self) -> &std::path::Path {
+        &self.log
     }
 
     /// Hook side: write the status heartbeat.
@@ -141,12 +156,47 @@ mod tests {
         let paths = tmp_paths();
         paths.ensure().unwrap();
         let q = ScriptQueue::new(&paths);
-        q.hook_log("line one");
-        q.hook_log("line two");
+        q.hook_log("line one").unwrap();
+        q.hook_log("line two").unwrap();
         assert_eq!(
             q.drain_log().unwrap(),
             vec!["line one".to_string(), "line two".to_string()]
         );
+    }
+
+    /// A log write that cannot land must be reported, not swallowed.
+    ///
+    /// This is the property that made v0.4.36 undiagnosable: `hook_log`
+    /// returned `()` and dropped the error, so "the queue path is wrong" and
+    /// "the hook never ran" produced an identical empty log. The hook side now
+    /// branches on this Result and falls back to stderr.
+    #[test]
+    fn hook_log_reports_an_unwritable_path() {
+        // Point at a path whose parent is a regular file, so the open cannot
+        // succeed and cannot be confused with "not yet created".
+        let blocker = std::env::temp_dir().join(format!(
+            "nebula-log-blocker-{}",
+            std::process::id()
+        ));
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let paths = NebulaPaths::root(blocker.join("nested"));
+        let q = ScriptQueue::new(&paths);
+        let res = q.hook_log("this cannot be written");
+        let _ = std::fs::remove_file(&blocker);
+        assert!(
+            res.is_err(),
+            "hook_log must surface an error when the log cannot be opened"
+        );
+    }
+
+    /// The reported path must be the one the caller can actually inspect.
+    #[test]
+    fn log_path_points_at_the_primary_log() {
+        let paths = tmp_paths();
+        paths.ensure().unwrap();
+        let q = ScriptQueue::new(&paths);
+        assert!(q.log_path().ends_with("log"));
+        assert!(q.log_path().starts_with(&paths.root));
     }
 
     #[test]
