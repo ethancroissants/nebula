@@ -746,14 +746,9 @@ mod tests {
 /// proceed even when the process is running in a sandbox or namespace where
 /// /proc/pid/exe doesn't resolve to a on-disk file that the injector can read.
 fn find_sober_binary(pid: i32) -> std::io::Result<std::path::PathBuf> {
-    // 1) Primary path: the process's own executable
-    if let Ok(candidate) = std::fs::read_link(format!("/proc/{pid}/exe")) {
-        if candidate.exists() && candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-
-    // 2) Flatpak runtime path — common stable build location
+    // 1) Flatpak runtime path — most reliable for flatpak users.
+    // Try this first so that /proc/pid/exe shims in namespaces don't short-circuit
+    // the resolution to a path that doesn't actually exist on the host.
     if let Ok(home) = std::env::var("HOME") {
         let flatpak = format!(
             "{}/.local/share/flatpak/app/org.vinegarhq.Sober/x86_64/stable/7b6430c703e8178baa536062099fc5a1e0c7cf213c0789695fa7660b62cb9d26/files/bin/sober",
@@ -761,8 +756,17 @@ fn find_sober_binary(pid: i32) -> std::io::Result<std::path::PathBuf> {
         );
         if let Ok(path) = std::path::PathBuf::from(flatpak).canonicalize() {
             if path.exists() && path.is_file() {
+                eprintln!("[nebula-inject] found Sober binary at flatpak runtime path");
                 return Ok(path);
             }
+        }
+    }
+
+    // 2) /proc/pid/exe — the process's own executable.
+    // Only use if it resolves to an on-disk regular file that actually exists.
+    if let Ok(candidate) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+        if candidate.exists() && candidate.is_file() {
+            return Ok(candidate);
         }
     }
 
@@ -772,7 +776,7 @@ fn find_sober_binary(pid: i32) -> std::io::Result<std::path::PathBuf> {
         return Ok(fallback);
     }
 
-    // 4) /tmp as last resort
+    // 4) /tmp as last resort — may contain a previously patched copy
     let tmp = std::path::PathBuf::from(format!("/tmp/sober_{}.bin", pid));
     if tmp.exists() && tmp.is_file() {
         return Ok(tmp);
