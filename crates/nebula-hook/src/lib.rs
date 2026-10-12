@@ -1043,6 +1043,38 @@ fn init_and_install() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
+    // SAFETY GATE — patching is OFF unless explicitly enabled.
+    //
+    // The hook now loads reliably (verified: LD_PRELOAD=SET, hook=4 mappings
+    // in the live sober process), but writing a 14-byte jump at an address we
+    // merely *inferred* crashed Sober within seconds.
+    //
+    // Sober runs the Roblox ARM64 APK through an x86_64 binary translator. The
+    // Luau code that actually executes is JIT-translated and does NOT live at
+    // the addresses in the on-disk ELF — that ELF describes the ARM64 source.
+    // So an ELF-derived `lua_pcall` address points into translation tables or
+    // unrelated data, not into live x86 code. Patching it corrupts memory.
+    //
+    // Until a target address is verified as live x86 code, we only observe and
+    // report. Set NEBULA_ALLOW_PATCH=1 to override, which is only safe if the
+    // address is known-good.
+    {
+        let q = hook().queue();
+        q.hook_log(&format!(
+            "resolved lua_pcall candidate at {:#x} — NOT patching (see SAFETY GATE)",
+            hook().api.pcall as usize
+        ));
+        if std::env::var_os("NEBULA_ALLOW_PATCH").is_none() {
+            q.hook_log(
+                "observe-only: translation makes ELF addresses unsafe. \
+                 Set NEBULA_ALLOW_PATCH=1 to force the patch.",
+            );
+            q.hook_set_status("OBSERVING");
+            return;
+        }
+        q.hook_log("NEBULA_ALLOW_PATCH set — proceeding with patch (risky)");
+    }
+
     let h = hook();
     if h.installed.swap(true, Ordering::AcqRel) {
         return; // already installed
