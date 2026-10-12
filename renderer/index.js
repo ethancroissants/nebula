@@ -128,8 +128,14 @@ async function refresh() {
 // Live progress from the main process during launch & inject.
 window.nebula.onProgress(({ phase, message }) => {
   if (phase === 'hooklog') {
-    // The hook's own log lines from inside the game — show as-is.
+    // Genuine hook output (the hook's own log file from inside the game).
     log(`[hook] ${message}`);
+    return;
+  }
+  if (phase === 'soberlog') {
+    // Sober's own stderr, relayed. NOT the hook — keep the labels distinct so
+    // "the hook is talking" is never confused with "Sober is talking".
+    log(`[sober] ${message}`);
     return;
   }
   if (phase === 'log') {

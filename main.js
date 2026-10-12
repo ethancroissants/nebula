@@ -675,7 +675,11 @@ ipcMain.handle('nebula:launchAndInject', async () => {
       for (const line of chunk.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed) continue;
-        sendProgress('hooklog', `[sober] ${trimmed}`);
+        // Sober's own stderr. This is NOT hook output — send it on its own
+        // phase so the renderer labels it [sober]. Routing it through
+        // 'hooklog' made every Sober line render as "[hook] [sober] ...", which
+        // reads as if the hook were alive when it had never loaded at all.
+        sendProgress('soberlog', trimmed);
         if (trimmed.includes('check_security')) {
           checkSecurityPassed = true;
           sendProgress('log', 'check_security seen — seeding hook preload now');
