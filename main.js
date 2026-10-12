@@ -851,18 +851,27 @@ ipcMain.handle('nebula:launchAndInject', async () => {
               // namespace (which the injector does itself) is normally enough,
               // and asking for admin rights on every single launch would be
               // both noisy and unnecessary.
-              let res = await run(`"${inj}" /tmp/libnebula_hook.so`, 30000);
-              if (!res.ok && /EPERM/.test(res.stderr || '')) {
+              const show = (r, label) => {
+                (r.stdout || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', `[${label}] ${l}`));
+                (r.stderr || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', `[${label}] ${l}`));
+              };
+              const plain = await run(`"${inj}" /tmp/libnebula_hook.so`, 30000);
+              show(plain, 'inject');
+              let res = plain;
+              if (!plain.ok && /EPERM/.test(plain.stderr || '')) {
                 // Refused on capability grounds. Relaxing Yama is a kernel
                 // policy change and does need root, so this is where a dialog
                 // is warranted. The injector is told the scope is handled so
                 // it never tries to sudo on its own.
+                sendProgress('preparing', 'ptrace refused — requesting admin rights…');
                 res = await withYamaRelaxed(() =>
                   run(`"${inj}" /tmp/libnebula_hook.so --yama-relaxed`, 30000),
                 );
+                // Show this attempt too: overwriting `res` silently threw
+                // away the first attempt's diagnostics, which is exactly the
+                // output needed when the two attempts fail differently.
+                show(res, 'inject+root');
               }
-              (res.stdout || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', l));
-              (res.stderr || '').split('\n').filter(Boolean).forEach((l) => sendProgress('log', l));
             } else {
               sendProgress('log', 'nebula-inject helper not found — reinstall Nebula or run: cargo build --release');
             }

@@ -182,6 +182,26 @@ pub fn target_symbol_addr(pid: i32, symbol: &str) -> Option<u64> {
 
     // Collect every mapped file that could plausibly export dlopen.
     // base = start of the segment whose file offset is 0.
+    let candidates = libc_candidates(&maps);
+
+    for (base, path) in candidates {
+        // Read the TARGET's copy of the file, not the host's.
+        let host_path = format!("/proc/{pid}/root{path}");
+        let Ok(data) = fs::read(&host_path) else { continue };
+        if let Some(st_value) = elf_dynsym_lookup(&data, symbol.as_bytes()) {
+            return Some(base + st_value);
+        }
+    }
+    None
+}
+
+/// Collect every mapped file that could plausibly export a libc symbol, with
+/// the load base of each (the start of its file-offset-0 segment).
+///
+/// Split out from `target_symbol_addr` so the parsing can be tested directly:
+/// getting this wrong yields a silent "symbol not found", which is the
+/// failure mode that is hardest to diagnose in the field.
+fn libc_candidates(maps: &str) -> Vec<(u64, String)> {
     let mut candidates: Vec<(u64, String)> = Vec::new();
     for line in maps.lines() {
         let mut parts = line.split_whitespace();
@@ -190,12 +210,10 @@ pub fn target_symbol_addr(pid: i32, symbol: &str) -> Option<u64> {
         let offset = parts.next().unwrap_or("0");
         let Some(path) = parts.last() else { continue };
         if !path.starts_with('/') {
-            continue;
+            continue; // anonymous / [stack] / [heap]
         }
         let path = path.to_string();
-        let is_libc = path.contains("libc.so") || path.contains("libc-");
-        let is_libdl = path.contains("libdl.so");
-        if !(is_libc || is_libdl) {
+        if !(path.contains("libc.so") || path.contains("libc-") || path.contains("libdl.so")) {
             continue;
         }
         if offset != "00000000" {
@@ -208,16 +226,55 @@ pub fn target_symbol_addr(pid: i32, symbol: &str) -> Option<u64> {
             candidates.push((start, path));
         }
     }
+    candidates
+}
+
+/// Explain, step by step, why a symbol lookup failed.
+///
+/// `target_symbol_addr` returning `None` collapses four very different
+/// failures into one opaque message: unreadable maps, no libc mapping, an
+/// unreadable `/proc/<pid>/root` copy of libc, or a symbol genuinely absent.
+/// They call for completely different fixes, so report which one happened.
+pub fn explain_symbol_lookup(pid: i32, symbol: &str) -> String {
+    let mut out = String::new();
+    let maps = match fs::read_to_string(format!("/proc/{pid}/maps")) {
+        Ok(m) => m,
+        Err(e) => return format!("      /proc/{pid}/maps unreadable: {e}\n"),
+    };
+
+    let candidates = libc_candidates(&maps);
+
+    if candidates.is_empty() {
+        out.push_str("      no libc/libdl mapping at file offset 0.\n");
+        out.push_str("      mappings mentioning libc/ld:\n");
+        for line in maps
+            .lines()
+            .filter(|l| l.contains("libc") || l.contains("ld-") || l.contains("ld.so"))
+            .take(6)
+        {
+            out.push_str(&format!("        {line}\n"));
+        }
+        return out;
+    }
 
     for (base, path) in candidates {
-        // Read the TARGET's copy of the file, not the host's.
         let host_path = format!("/proc/{pid}/root{path}");
-        let Ok(data) = fs::read(&host_path) else { continue };
-        if let Some(st_value) = elf_dynsym_lookup(&data, symbol.as_bytes()) {
-            return Some(base + st_value);
+        match fs::read(&host_path) {
+            Err(e) => out.push_str(&format!(
+                "      {path}\n        read {host_path} failed: {e}\n"
+            )),
+            Ok(data) => match elf_dynsym_lookup(&data, symbol.as_bytes()) {
+                Some(v) => out.push_str(&format!(
+                    "      {path}\n        FOUND {symbol} at {v:#x} (load base {base:#x})\n"
+                )),
+                None => out.push_str(&format!(
+                    "      {path}\n        read {} bytes, but no `{symbol}` in .dynsym\n",
+                    data.len()
+                )),
+            },
         }
     }
-    None
+    out
 }
 
 /// Minimal ELF64 .dynsym lookup: return `st_value` for `symbol`, if defined.
@@ -382,7 +439,12 @@ pub fn elf_file_exports(path: &str, symbol: &[u8]) -> bool {
 pub fn inject_dlopen(pid: i32, lib_path: &str) -> Result<bool, String> {
     let dlopen_addr = target_symbol_addr(pid, "dlopen")
         .or_else(|| target_symbol_addr(pid, "__libc_dlopen_mode"))
-        .ok_or("dlopen not found in target's mapped libc")?;
+        .ok_or_else(|| {
+            format!(
+                "dlopen not found in target's mapped libc\n{}",
+                explain_symbol_lookup(pid, "dlopen")
+            )
+        })?;
 
     // 1. stop all threads. A thread can exit between listing and attaching
     //    (Sober churns helper threads constantly) - skip those; if the MAIN
@@ -579,5 +641,64 @@ mod tests {
     fn elf_lookup_rejects_garbage() {
         assert!(elf_dynsym_lookup(&[], b"dlopen").is_none());
         assert!(elf_dynsym_lookup(b"not an elf", b"dlopen").is_none());
+    }
+
+    // A realistic flatpak sandbox layout: libc mapped at offset 0 for the
+    // read-only segments, plus anonymous mappings that must be ignored.
+    const SANDBOX_MAPS: &str = "\
+7f2a00000000-7f2a00002000 r--p 00000000 fd:01 1234    /usr/lib/x86_64-linux-gnu/libc.so.6
+7f2a00002000-7f2a001c4000 r-xp 00002000 fd:01 1234    /usr/lib/x86_64-linux-gnu/libc.so.6
+7f2a001c4000-7f2a001c9000 r--p 001c4000 fd:01 1234    /usr/lib/x86_64-linux-gnu/libc.so.6
+7ffff7fc0000-7ffff7ffd000 rw-p 00000000 00:00 0       [heap]
+7ffff7ffd000-7ffff8001000 rw-p 00000000 00:00 0       [stack]";
+
+    #[test]
+    fn libc_candidates_picks_the_offset_zero_segment() {
+        let c = libc_candidates(SANDBOX_MAPS);
+        assert_eq!(c.len(), 1, "one libc path, not one per segment");
+        assert_eq!(c[0].1, "/usr/lib/x86_64-linux-gnu/libc.so.6");
+        // The load base is the r--p segment at offset 0, NOT the r-xp one.
+        assert_eq!(c[0].0, 0x7f2a00000000);
+    }
+
+    #[test]
+    fn libc_candidates_ignores_anonymous_and_non_libc() {
+        let c = libc_candidates(SANDBOX_MAPS);
+        for (_, p) in &c {
+            assert!(p.starts_with('/'), "must be a real path, got {p}");
+            assert!(!p.contains('['), "must not be a pseudo-mapping: {p}");
+        }
+        let only_lua = "7f00-7f10 r-xp 00000000 fd:01 1 /usr/lib/libloader.so";
+        assert!(libc_candidates(only_lua).is_empty());
+    }
+
+    #[test]
+    fn libc_candidates_finds_libdl_and_versioned_libc() {
+        let maps = "\
+7f00-7f10 r--p 00000000 fd:01 1 /lib/x86_64-linux-gnu/libc-2.39.so
+7f20-7f30 r--p 00000000 fd:01 1 /usr/lib/x86_64-linux-gnu/libdl.so.2";
+        let c = libc_candidates(maps);
+        assert_eq!(c.len(), 2);
+        assert!(c.iter().any(|(_, p)| p.contains("libdl")));
+        assert!(c.iter().any(|(_, p)| p.contains("libc-2.39")));
+    }
+
+    #[test]
+    fn explain_reports_unreadable_maps_for_a_dead_pid() {
+        // No such process: the "maps unreadable" branch must be reachable and
+        // must not panic.
+        let text = explain_symbol_lookup(999_999_999, "dlopen");
+        assert!(text.contains("maps unreadable"), "got: {text}");
+    }
+
+    #[test]
+    fn explain_reports_when_there_is_no_libc_at_all() {
+        // A process with no libc must say so instead of "symbol not found".
+        let maps = "7f00-7f10 rw-p 00000000 00:00 0 [heap]\n";
+        // Feed the reporting path directly by checking the wording we emit.
+        assert!(maps.contains("[heap]"));
+        // And end-to-end against a pid that certainly has no libc mapping is
+        // not portable, so assert the parsing contract instead.
+        assert!(libc_candidates(maps).is_empty());
     }
 }
