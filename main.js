@@ -359,28 +359,6 @@ function procHasHook(pid) {
 // Writes /etc/ld.so.preload there and copies the .so to a path that exists
 // inside that root (/tmp), so glibc picks the hook up at the next process
 // start — immune to environment scrubbing.
-function seedHookIntoProcRoot(pid, hookLib) {
-  try {
-    const root = `/proc/${pid}/root`;
-    const etc = path.join(root, 'etc');
-    fs.mkdirSync(etc, { recursive: true });
-    // Copy the .so into the root's /tmp so the path is valid in that root.
-    fs.mkdirSync(path.join(root, 'tmp'), { recursive: true });
-    const target = path.join(root, 'tmp', 'libnebula_hook.so');
-    fs.copyFileSync(hookLib, target);
-    fs.chmodSync(target, 0o755);
-    // CRITICAL: the preload entry must be the path as seen FROM INSIDE the
-    // root (/tmp/libnebula_hook.so), not the host-side /proc/<pid>/root
-    // spelling — inside the sandbox /proc is a different pid namespace and
-    // the host path doesn't resolve, so the loader silently skips it.
-    fs.writeFileSync(path.join(etc, 'ld.so.preload'), '/tmp/libnebula_hook.so\n');
-    return true;
-  } catch (e) {
-    sendProgress('log', `Could not seed pid ${pid}: ${e.code || e}`);
-    return false;
-  }
-}
-
 async function anyProcHasHook() {
   const procs = await findSoberProcesses();
   for (const proc of procs) {
@@ -437,102 +415,51 @@ async function clearStalePreloads() {
 // /etc is sourced from it). glibc reads it at every process start inside the
 // sandbox regardless of environment. Tries the user runtime first, then a
 // non-interactive sudo for system installs. Returns whether anything stuck.
-async function seedRuntimePreload(hookLib) {
-  const seedNotes = [];
-  let runtimePreloadPath = '';
-  try {
-    const rtDirs = runtimeEtcDirs();
-    let seeded = false;
-    for (const etc of rtDirs) {
-      try {
-        fs.mkdirSync(etc, { recursive: true });
-        fs.writeFileSync(path.join(etc, 'ld.so.preload'), `${hookLib}\n`);
-        seedNotes.push(`runtime preload OK: ${etc}`);
-        runtimePreloadPath = hookLib;
-        seeded = true;
-        break; // first writable runtime wins
-      } catch (e) {
-        if (e.code === 'EACCES' || e.code === 'EPERM') {
-          // System install — escalate (dialog, never a terminal prompt).
-          const res = await runPrivileged(
-            `mkdir -p ${shQuote(etc)} && printf '%s\\n' ${shQuote(hookLib)} > ${shQuote(path.join(etc, 'ld.so.preload'))}`,
-            15000,
-          );
-          if (res.ok) {
-            seedNotes.push(`runtime preload OK (${res.how}): ${etc}`);
-            runtimePreloadPath = hookLib;
-            seeded = true;
-            break;
-          }
-          seedNotes.push(`runtime not writable: ${etc} (${res.how})`);
-        } else {
-          seedNotes.push(`runtime seed failed: ${etc} (${e.code || e})`);
-        }
-      }
-    }
-    if (!seeded) {
-      seedNotes.push('could not write ld.so.preload into any flatpak runtime');
-    }
-    for (const note of seedNotes) log(note, seeded ? 'ok' : 'warn');
-  } catch {}
-  return { seeded: !!runtimePreloadPath, runtimePreloadPath };
-}
-
 // Apply the flatpak override ourselves (no external script, no PATH issues).
-// `skipRuntimePreload`: leave every ld.so.preload untouched — used when the
-// launch must look clean until Sober's check_security has passed.
-async function applyOverride(hookLib, { skipRuntimePreload = false } = {}) {
+//
+// Mechanism: LD_PRELOAD via `flatpak override --env=`. Verified to survive
+// flatpak's default env scrub and reach ld.so inside the sandbox:
+//
+//   flatpak run --command=sh --env=LD_PRELOAD=…/libz.so.1 org.vinegarhq.Sober
+//   -> LD_PRELOAD=[.../libz.so.1], 5 libz mappings, libcurl control 0
+//
+// We deliberately do NOT also seed ld.so.preload. Two entries for the same
+// library under different paths make the loader map it twice — two
+// constructors, two trampoline installs, a double-patched lua_pcall, crash.
+// LD_PRELOAD alone covers every process the sandbox execs.
+async function applyOverride(hookLib) {
   await run(`flatpak override --user --reset ${APP_ID}`, 15000);
   fs.mkdirSync(QUEUE_DIR, { recursive: true });
-  // NOTE: we deliberately do NOT set --env=LD_PRELOAD anymore. When both
-  // LD_PRELOAD and /etc/ld.so.preload list the hook (different paths), the
-  // loader can map it twice — two constructors, two trampoline installs,
-  // a double-patched lua_pcall → crash. /etc/ld.so.preload alone covers
-  // every sandbox process and survives Sober's env-scrubbing stub.
+
   const fsRes = await run(`flatpak override --user --filesystem="${QUEUE_DIR}:rw" ${APP_ID}`, 15000);
 
-  // CRITICAL: the sandbox blocks $HOME entirely (Sober's manifest has no
-  // filesystem permissions). Preload paths pointing into $HOME are silently
-  // ignored by the loader if the file can't be read. Grant the lib's
-  // directory read-only so the runtime-level preload file resolves.
+  // The sandbox blocks $HOME entirely. Without this grant the loader cannot
+  // read the .so and silently skips the preload.
   const libDir = path.dirname(hookLib);
   const libRes = await run(`flatpak override --user --filesystem="${libDir}:ro" ${APP_ID}`, 15000);
 
-  // BELT & SUSPENDERS: seed the runtime-level preload unless the caller wants
-  // a clean launch (the seed gate writes it later, after check_security).
-  let runtimePreloadPath = '';
-  if (!skipRuntimePreload) {
-    const seeded = await seedRuntimePreload(hookLib);
-    runtimePreloadPath = seeded.runtimePreloadPath;
-  }
-  void runtimePreloadPath;
+  // Absolute path, and no ":ro" suffix — that is flatpak --filesystem syntax.
+  // LD_PRELOAD is a colon-separated list of library paths, so ":ro" would make
+  // the loader search for a file literally named "libnebula_hook.so:ro".
+  const absHook = path.resolve(hookLib);
+  const envRes = await run(`flatpak override --user --env=LD_PRELOAD="${absHook}" ${APP_ID}`, 15000);
 
-  if (fsRes.ok && libRes.ok) {
-    // Verify the runtime preload actually stuck before launching.
+  if (fsRes.ok && libRes.ok && envRes.ok) {
+    // Verify it actually stuck — flatpak silently drops malformed overrides.
     let verified = false;
-    for (const etc of runtimeEtcDirs()) {
-      try {
-        const content = fs.readFileSync(path.join(etc, 'ld.so.preload'), 'utf8');
-        if (content.includes('libnebula_hook')) { verified = true; break; }
-      } catch {}
-    }
-    if (verified || !runtimePreloadPath) {
+    try {
+      const shown = await run(`flatpak override --user --show ${APP_ID}`, 10000);
+      verified = (shown.stdout || '').includes(absHook);
+    } catch {}
+    if (verified) {
+      log(`LD_PRELOAD override set: ${absHook}`, 'ok');
       return { ok: true };
     }
-    return { ok: false, error: 'Runtime preload verification failed (ld.so.preload missing)' };
+    return { ok: false, error: 'LD_PRELOAD override did not appear in --show' };
   }
 
-  // Fallback: legacy attach helper script
-  const script = findAttachScript();
-  if (script) {
-    const res = await run(`"${script}" "${hookLib}"`, 30000);
-    if (res.ok) return { ok: true };
-    return { ok: false, error: res.stderr || res.stdout || 'nebula-attach failed' };
-  }
-  return {
-    ok: false,
-    error: [fsRes, libRes].map((r) => r.stderr).filter(Boolean).join('; ') || 'flatpak override failed',
-  };
+  const err = [fsRes, libRes, envRes].map((r) => r.stderr).filter(Boolean).join('; ');
+  return { ok: false, error: err || 'flatpak override failed' };
 }
 
 // ------------------------------------------------------------------- IPC ----
@@ -689,20 +616,22 @@ ipcMain.handle('nebula:launchAndInject', async () => {
       return { ok: true, injected: false, safeMode: true };
     }
 
-    // 2b. Override the sandbox AND seed the runtime ld.so.preload BEFORE
-    // launching Sober.
+    // 2b. Override the sandbox to preload the hook into Sober.
     //
-    // ld.so.preload is read by the dynamic loader at exec() time and never
-    // again. The previous flow deferred this write until after check_security,
-    // by which point the Sober process had already exec'd — so the hook could
-    // never be mapped no matter how long we seeded. That left ptrace as the
-    // only route, and Sober's anti-debug kills a traced process.
+    // Delivery is LD_PRELOAD via `flatpak override --env=`, which ld.so reads
+    // at exec(). Two earlier mechanisms were tried and both are dead ends:
     //
-    // Seeding up front removes the need for both ptrace and binary patching.
-    // It is also architecturally unremarkable: Sober already preloads its own
-    // libbadcpu.so into the process at startup via the same mechanism, so a
-    // second preloaded object is not something check_security has any reason
-    // to treat specially.
+    //   * Writing the flatpak runtime's <runtime>/files/etc/ld.so.preload.
+    //     The sandbox's /etc is a private tmpfs rebuilt every launch; flatpak
+    //     generates ld.so.conf and ld.so.cache itself and never exposes that
+    //     file. Confirmed by probe: the runtime's files/etc contained nothing
+    //     but the file we ourselves created.
+    //   * Deferring the write until after check_security. ld.so.preload is
+    //     read only at exec, so a write after launch can never affect the
+    //     already-running process. This forced ptrace, which Sober detects.
+    //
+    // LD_PRELOAD needs no binary patching, and Sober already preloads its own
+    // libbadcpu.so this way, so a second preloaded object is unremarkable.
     const seedingEnabled = !prefs.safeMode;
     let override;
     if (seedingEnabled) {
@@ -832,24 +761,17 @@ ipcMain.handle('nebula:launchAndInject', async () => {
         }
       }
 
-      if (seedingEnabled && checkSecurityPassed && !runtimeSeedDone) {
-        runtimeSeedDone = true;
-        sendProgress('preparing', 'check_security passed — seeding runtime preload…');
-        await seedRuntimePreload(hookLib);
-      }
-      // Seed /etc/ld.so.preload into EVERY Sober process's filesystem view.
-      // Held back until the check_security gate opens (see above).
-      if (seedingEnabled && checkSecurityPassed) {
-        for (const proc of procs) {
-          if (seededRoots.has(proc.pid)) continue;
-          const ok = seedHookIntoProcRoot(proc.pid, hookLib);
-          // Cache failures too so we don't spam the console every 700 ms.
-          seededRoots.add(proc.pid);
-          if (ok) {
-            sendProgress('log', `Seeded hook into pid ${proc.pid}'s filesystem root`);
-          }
-        }
-      }
+      // No seeding gates any more. The hook is delivered by LD_PRELOAD, which
+      // ld.so reads at exec(). Writing ld.so.preload here would be both
+      // useless (it is read only at exec, already past) and dangerous: the
+      // per-process seeder wrote a *different* path (/tmp/libnebula_hook.so)
+      // than LD_PRELOAD uses, so a child that execs later would map the same
+      // library twice — two constructors, two trampolines, double-patched
+      // lua_pcall, crash. This is exactly the bug that made the old
+      // LD_PRELOAD path look unworkable.
+      void seedingEnabled;
+      void runtimeSeedDone;
+      void seededRoots;
 
       // One-time deep diagnostic ~8s in: what does the sandbox's /etc
       // actually contain? Answers whether the runtime preload propagated.
